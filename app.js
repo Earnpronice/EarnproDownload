@@ -1,0 +1,2237 @@
+// ================= SOUND SYNTHESIS ENGINE =================
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+window.playSound = function(type) {
+    if (!audioCtx) return;
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const now = audioCtx.currentTime;
+    if (type === 'click') {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.frequency.setValueAtTime(650, now);
+        osc.frequency.exponentialRampToValueAtTime(320, now + 0.05);
+        gain.gain.setValueAtTime(0.2, now);
+        gain.gain.linearRampToValueAtTime(0.01, now + 0.05);
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        osc.start(now); osc.stop(now + 0.05);
+    } else if (type === 'tick') {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(850, now);
+        gain.gain.setValueAtTime(0.2, now);
+        gain.gain.linearRampToValueAtTime(0.01, now + 0.03);
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        osc.start(now); osc.stop(now + 0.03);
+    } else if (type === 'scratch') {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(250 + Math.random() * 200, now);
+        gain.gain.setValueAtTime(0.05, now);
+        gain.gain.linearRampToValueAtTime(0.001, now + 0.04);
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        osc.start(now); osc.stop(now + 0.04);
+    } else if (type === 'win') {
+        [523.25, 659.25, 783.99, 1046.50].forEach((freq, i) => {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.frequency.setValueAtTime(freq, now + (i * 0.09));
+            gain.gain.setValueAtTime(0.25, now + (i * 0.09));
+            gain.gain.linearRampToValueAtTime(0.01, now + (i * 0.09) + 0.25);
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            osc.start(now + (i * 0.09)); osc.stop(now + (i * 0.09) + 0.25);
+        });
+    }
+};
+
+window.playDeceleratingSpinSound = function(duration = 4500) {
+    let startTime = Date.now();
+    function nextTick() {
+        let elapsed = Date.now() - startTime;
+        if (elapsed >= duration) return;
+        window.playSound('tick');
+        let progress = elapsed / duration;
+        let currentGap = 50 + (progress * progress * 400); 
+        setTimeout(nextTick, currentGap);
+    }
+    nextTick();
+};
+
+// ================= FIREBASE CONFIGURATION =================
+const firebaseConfig = {
+  apiKey: "AIzaSyDEKw8d53Suys4ha5RP7-hfGuenmtkGexU",
+  authDomain: "earnpro-9ee49.firebaseapp.com",
+  databaseURL: "https://earnpro-9ee49-default-rtdb.firebaseio.com",
+  projectId: "earnpro-9ee49",
+  storageBucket: "earnpro-9ee49.firebasestorage.app",
+  messagingSenderId: "758583651801",
+  appId: "1:758583651801:web:1753e8277163ff2eb9fdc8"
+};
+
+if (!window.firebase.apps.length) window.firebase.initializeApp(firebaseConfig);
+const auth = window.firebase.auth();
+const db = window.firebase.database();
+
+window.auth = auth;
+window.db = db;
+
+let currentUserData = null;
+let currentAuthUser = null;
+let appSettings = {};
+let tasksList = [];
+let userSubmissionsMap = {};
+let userWaitingTasksMap = {};
+let currentSelectedTask = null;
+let currentWaitingTaskId = null;
+let currentWheelSegments = [90, 10, 50, 20, 75, 5, 80, 15, 60, 30, 40, 25];
+let isSpinning = false;
+let selectedWithdrawRupees = 20;
+let selectedWithdrawCoins = 2000;
+let currentWithdrawMethod = 'UPI';
+let currentVerifyingLevel = 1;
+let dailyCodeCurrentPage = 0;
+let bannerInterval = null;
+let currentBannerIndex = 0;
+let activeTaskSubTab = 'available';
+
+// UI Helpers
+window.showLoader = function() {
+    const el = document.getElementById('loader');
+    if (el) { el.classList.remove('hidden'); el.classList.add('flex'); }
+};
+window.hideLoader = function() {
+    const el = document.getElementById('loader');
+    if (el) { el.classList.add('hidden'); el.classList.remove('flex'); }
+};
+window.showToast = function(msg, type='info') {
+    const t = document.getElementById('toast');
+    const msgEl = document.getElementById('toast-msg');
+    if (msgEl) msgEl.innerText = msg;
+    if (t) {
+        t.style.opacity = '1';
+        setTimeout(() => t.style.opacity = '0', 3200);
+    }
+};
+
+window.openPage = function(id) {
+    const el = document.getElementById(id);
+    if (el) { el.classList.remove('hidden'); el.classList.add('flex'); }
+};
+window.closePage = function(id) {
+    const el = document.getElementById(id);
+    if (el) { el.classList.add('hidden'); el.classList.remove('flex'); }
+};
+
+// ================= REALTIME SETTINGS LISTENER =================
+db.ref('settings').on('value', snap => {
+    if (snap.exists()) {
+        appSettings = snap.val();
+        if (appSettings.dailyCodesWebLink && document.getElementById('admin-codes-web-link-input')) {
+            document.getElementById('admin-codes-web-link-input').value = appSettings.dailyCodesWebLink;
+        }
+        if (appSettings.referralLink && document.getElementById('admin-referral-link-input')) {
+            document.getElementById('admin-referral-link-input').value = appSettings.referralLink;
+        }
+        if (appSettings.proofGroupLink && document.getElementById('admin-proof-group-link-input')) {
+            document.getElementById('admin-proof-group-link-input').value = appSettings.proofGroupLink;
+        }
+        if (appSettings.telegramChannel && document.getElementById('admin-telegram-link-input')) {
+            document.getElementById('admin-telegram-link-input').value = appSettings.telegramChannel;
+        }
+        const isMaint = appSettings.maintenanceMode === true;
+        const screen = document.getElementById('maintenance-screen');
+        if (isMaint && !sessionStorage.getItem('earnpro_admin_authed')) {
+            if (screen) { screen.classList.remove('hidden'); screen.classList.add('flex'); }
+        } else if (screen) {
+            screen.classList.add('hidden'); screen.classList.remove('flex');
+        }
+        document.getElementById('admin-maintenance-toggle')?.classList.toggle('active', isMaint);
+    }
+});
+
+window.checkMaintenanceAndInit = function() {
+    window.showToast("Checking system status...", "info");
+    if (!appSettings.maintenanceMode) {
+        document.getElementById('maintenance-screen')?.classList.add('hidden');
+        document.getElementById('maintenance-screen')?.classList.remove('flex');
+    }
+};
+
+window.openDailyCodesWebsiteLink = function() {
+    const link = appSettings.dailyCodesWebLink || 'https://earnpro.app/daily-codes';
+    window.open(link, '_blank');
+};
+
+window.handleTelegramBannerClick = function() {
+    const link = appSettings.telegramChannel || 'https://t.me/';
+    window.open(link, '_blank');
+    window.showToast("Opening Telegram channel...", "info");
+};
+
+// Proof Send Group Link
+window.openProofSendGroupLink = function() {
+    const link = appSettings.proofGroupLink || appSettings.telegramChannel || 'https://t.me/';
+    window.open(link, '_blank');
+    window.showToast("Opening Proof Submission Group. Send your UID & Screenshot!", "info");
+};
+
+window.saveAdminProofGroupLink = function() {
+    const val = document.getElementById('admin-proof-group-link-input').value.trim();
+    if (!val) return;
+    db.ref('settings/proofGroupLink').set(val).then(() => window.showToast("Proof Submission Group Link saved!", "success"));
+};
+
+window.saveAdminCodesWebLink = function() {
+    const val = document.getElementById('admin-codes-web-link-input').value.trim();
+    if (!val) return;
+    db.ref('settings/dailyCodesWebLink').set(val).then(() => window.showToast("Daily codes link saved successfully!", "success"));
+};
+
+window.saveAdminReferralLink = function() {
+    const val = document.getElementById('admin-referral-link-input').value.trim();
+    if (!val) return;
+    db.ref('settings/referralLink').set(val).then(() => window.showToast("Root referral link updated!", "success"));
+};
+
+window.saveAdminTelegramLink = function() {
+    const val = document.getElementById('admin-telegram-link-input').value.trim();
+    if (!val) return;
+    db.ref('settings/telegramChannel').set(val).then(() => window.showToast("Telegram link updated!", "success"));
+};
+
+// ================= TASK SUB-TABS: AVAILABLE & WAITING TASKS =================
+window.switchTaskSectionSubTab = function(tab) {
+    activeTaskSubTab = tab;
+    const availBtn = document.getElementById('tab-btn-task-available');
+    const waitBtn = document.getElementById('tab-btn-task-waiting');
+    const availView = document.getElementById('task-list-container');
+    const waitView = document.getElementById('waiting-tasks-container');
+
+    if (tab === 'available') {
+        availBtn.className = "flex-1 py-2.5 rounded-xl text-xs font-black uppercase tracking-wider bg-emerald-500 text-slate-950 transition-all shadow-md";
+        waitBtn.className = "flex-1 py-2.5 rounded-xl text-xs font-black uppercase tracking-wider bg-white/10 text-slate-300 transition-all flex items-center justify-center gap-1.5";
+        availView?.classList.remove('hidden');
+        waitView?.classList.add('hidden');
+    } else {
+        waitBtn.className = "flex-1 py-2.5 rounded-xl text-xs font-black uppercase tracking-wider bg-amber-400 text-slate-950 transition-all shadow-md flex items-center justify-center gap-1.5";
+        availBtn.className = "flex-1 py-2.5 rounded-xl text-xs font-black uppercase tracking-wider bg-white/10 text-slate-300 transition-all";
+        waitView?.classList.remove('hidden');
+        availView?.classList.add('hidden');
+        renderWaitingTasksUI();
+    }
+};
+
+// Listen user waiting tasks in Realtime DB
+function listenUserWaitingTasks(uid) {
+    db.ref('waitingTasks/' + uid).on('value', snap => {
+        userWaitingTasksMap = {};
+        if (snap.exists()) {
+            userWaitingTasksMap = snap.val();
+        }
+        const count = Object.keys(userWaitingTasksMap).length;
+        const badge = document.getElementById('waiting-task-badge');
+        if (badge) badge.innerText = count;
+        if (activeTaskSubTab === 'waiting') renderWaitingTasksUI();
+    });
+}
+
+// Helper functions for task checking status
+function isTaskPendingReview(status) {
+    if (!status) return false;
+    const s = String(status).toLowerCase();
+    return s.includes('proof sent') || s.includes('wait for checking') || s.includes('checking') || s.includes('under review');
+}
+
+function isTaskRejected(status) {
+    if (!status) return false;
+    const s = String(status).toLowerCase();
+    return s.includes('reject');
+}
+
+function renderWaitingTasksUI() {
+    const container = document.getElementById('waiting-tasks-container');
+    if (!container) return;
+    const keys = Object.keys(userWaitingTasksMap);
+
+    if (keys.length === 0) {
+        container.innerHTML = `
+            <div class="p-8 text-center text-slate-400 my-auto">
+                <i class="fas fa-hourglass-half text-3xl text-amber-400 mb-2"></i>
+                <h4 class="text-sm font-black text-white">No Waiting Tasks</h4>
+                <p class="text-xs text-slate-400 mt-1">When you click Download in a task, it appears here ready for proof submission.</p>
+            </div>
+        `;
+        return;
+    }
+
+    let html = '';
+    keys.forEach(k => {
+        const item = userWaitingTasksMap[k] || {};
+        const isPending = isTaskPendingReview(item.status);
+        const isRej = isTaskRejected(item.status);
+
+        let badgeHtml = '';
+        let statusText = '';
+        let actionLabel = '';
+
+        if (isPending) {
+            badgeHtml = `<span class="bg-blue-500/20 text-blue-300 border border-blue-400/40 text-[9px] font-black px-2.5 py-1 rounded-xl uppercase flex items-center gap-1"><i class="fas fa-clock"></i> CHECKING PENDING</span>`;
+            statusText = `Status: <strong class="text-amber-300 font-bold">Wait for Checking (Submitted)</strong>`;
+            actionLabel = `<span class="text-blue-300 font-bold flex items-center gap-1">Under Review <i class="fas fa-hourglass-half text-[9px]"></i></span>`;
+        } else if (isRej) {
+            badgeHtml = `<span class="bg-rose-500/20 text-rose-300 border border-rose-400/40 text-[9px] font-black px-2.5 py-1 rounded-xl uppercase flex items-center gap-1"><i class="fas fa-rotate-right"></i> RE-SUBMIT PROOF</span>`;
+            statusText = `Status: <strong class="text-rose-400 font-bold">Rejected by Admin (Resubmit Available)</strong>`;
+            actionLabel = `<span class="text-rose-300 font-bold flex items-center gap-1">Tap to Resubmit <i class="fas fa-arrow-right text-[9px]"></i></span>`;
+        } else {
+            badgeHtml = `<span class="bg-amber-400 text-slate-950 text-[9px] font-black px-2.5 py-1 rounded-xl uppercase">SUBMIT PROOF</span>`;
+            statusText = `Status: <strong class="text-amber-400 font-bold">${item.status || 'Waiting for proof'}</strong>`;
+            actionLabel = `<span class="text-emerald-400 font-bold flex items-center gap-1">Tap to Open <i class="fas fa-arrow-right text-[9px]"></i></span>`;
+        }
+
+        const borderClass = isRej ? 'border-rose-500/40' : (isPending ? 'border-blue-500/40' : 'border-amber-500/40');
+
+        html += `
+            <div onclick="playSound('click'); openWaitingProofModal('${k}')" class="glass-panel p-4 rounded-3xl ${borderClass} cursor-pointer active:scale-95 transition-all shadow-lg space-y-2.5">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-xl ${isRej ? 'bg-rose-500/20 text-rose-300 border border-rose-400/40' : (isPending ? 'bg-blue-500/20 text-blue-300 border border-blue-400/40' : 'bg-amber-500/20 text-amber-300 border border-amber-400/40')} flex items-center justify-center text-base">
+                            <i class="${isRej ? 'fas fa-triangle-exclamation' : (isPending ? 'fas fa-clock' : 'fas fa-hourglass-start')}"></i>
+                        </div>
+                        <div>
+                            <h4 class="font-black text-white text-xs">${item.title || 'App Download Task'}</h4>
+                            <div class="text-[9.5px] text-emerald-400 font-bold">+${item.reward || 0} Coins Reward</div>
+                        </div>
+                    </div>
+                    ${badgeHtml}
+                </div>
+                <div class="p-2 bg-black/30 rounded-xl text-[10px] text-slate-300 flex items-center justify-between">
+                    <span>${statusText}</span>
+                    ${actionLabel}
+                </div>
+            </div>
+        `;
+    });
+    container.innerHTML = html;
+}
+
+// Waiting Proof Modal (Hindi Steps 1 & 2)
+window.openWaitingProofModal = function(taskId) {
+    currentWaitingTaskId = taskId;
+    const item = userWaitingTasksMap[taskId] || { title: 'App Task', reward: 0 };
+    document.getElementById('wtask-proof-title').innerText = `${item.title} (+${item.reward} Coins)`;
+
+    const isPending = isTaskPendingReview(item.status);
+    const isRej = isTaskRejected(item.status);
+
+    const banner = document.getElementById('wtask-status-banner');
+    const confirmBtn = document.getElementById('wtask-confirm-btn');
+    const noteEl = document.getElementById('wtask-confirm-note');
+
+    if (banner) {
+        if (isPending) {
+            banner.className = "bg-blue-950/80 border-2 border-blue-400/40 p-4 rounded-3xl text-center space-y-2 shadow-xl";
+            banner.innerHTML = `
+                <div class="w-10 h-10 rounded-2xl bg-blue-500/20 text-blue-300 border border-blue-400/40 mx-auto flex items-center justify-center text-lg">
+                    <i class="fas fa-clock"></i>
+                </div>
+                <span class="text-[9.5px] font-black uppercase tracking-widest text-blue-300 bg-blue-500/10 px-3 py-1 rounded-full border border-blue-400/20">UNDER CHECKING</span>
+                <h4 class="text-xs font-black text-white">Proof Checking Pending Hai</h4>
+                <p class="text-[11px] text-blue-200/90 font-medium leading-relaxed">
+                    Aapne is task ka proof pehle hi checking ke liye submit kar diya hai. Admin iski checking kar rahe hain.<br>
+                    <strong class="text-amber-300">Admin ke dwara reject hone ke baad hi aap ise dubara submit kar sakenge.</strong>
+                </p>
+            `;
+            banner.classList.remove('hidden');
+        } else if (isRej) {
+            banner.className = "bg-rose-950/80 border-2 border-rose-500/40 p-4 rounded-3xl text-center space-y-2 shadow-xl";
+            banner.innerHTML = `
+                <div class="w-10 h-10 rounded-2xl bg-rose-500/20 text-rose-300 border border-rose-400/40 mx-auto flex items-center justify-center text-lg">
+                    <i class="fas fa-triangle-exclamation"></i>
+                </div>
+                <span class="text-[9.5px] font-black uppercase tracking-widest text-rose-300 bg-rose-500/10 px-3 py-1 rounded-full border border-rose-400/20">ADMIN REJECTED</span>
+                <h4 class="text-xs font-black text-white">Previous Proof Rejected</h4>
+                <p class="text-[11px] text-rose-200/90 font-medium leading-relaxed">
+                    Admin ne aapka pehla proof reject kar diya tha. Ab aap group me sahi UID aur screenshot bhej kar dubara <strong class="text-emerald-300">RE-SUBMIT PROOF</strong> kar sakte hain.
+                </p>
+            `;
+            banner.classList.remove('hidden');
+        } else {
+            banner.innerHTML = '';
+            banner.classList.add('hidden');
+        }
+    }
+
+    if (confirmBtn) {
+        if (isPending) {
+            confirmBtn.disabled = true;
+            confirmBtn.className = "w-full bg-slate-800/90 text-slate-400 border border-white/10 font-black py-4 rounded-2xl text-xs uppercase tracking-wider shadow-none opacity-80 cursor-not-allowed flex items-center justify-center gap-2";
+            confirmBtn.innerHTML = '<i class="fas fa-hourglass-half text-amber-400"></i> ALREADY SUBMITTED (WAIT FOR CHECKING)';
+            if (noteEl) noteEl.innerHTML = '<span class="text-amber-300 font-semibold">Yeh task abhi admin review me hai. Dobara submit nahi kar sakte jab tak admin reject na kare.</span>';
+        } else if (isRej) {
+            confirmBtn.disabled = false;
+            confirmBtn.className = "w-full glow-btn-gold text-slate-950 font-black py-4 rounded-2xl text-xs uppercase tracking-wider active:scale-95 transition-transform shadow-lg flex items-center justify-center gap-2";
+            confirmBtn.innerHTML = '<i class="fas fa-rotate-right"></i> RE-SUBMIT PROOF';
+            if (noteEl) noteEl.innerHTML = 'Naya proof group me send karne ke baad neeche <strong>RE-SUBMIT PROOF</strong> button dabayein.';
+        } else {
+            confirmBtn.disabled = false;
+            confirmBtn.className = "w-full glow-btn-gold text-slate-950 font-black py-4 rounded-2xl text-xs uppercase tracking-wider active:scale-95 transition-transform shadow-lg flex items-center justify-center gap-2";
+            confirmBtn.innerHTML = '<i class="fas fa-circle-check"></i> CONFIRM';
+            if (noteEl) noteEl.innerHTML = 'Proof send karne ke baad neeche <strong>CONFIRM</strong> button dabayein taaki Admin use verify karke coins credit karein.';
+        }
+    }
+
+    document.getElementById('waiting-proof-modal').classList.remove('hidden');
+    document.getElementById('waiting-proof-modal').classList.add('flex');
+};
+
+window.closeWaitingProofModal = function() {
+    document.getElementById('waiting-proof-modal').classList.add('hidden');
+    document.getElementById('waiting-proof-modal').classList.remove('flex');
+};
+
+window.confirmTaskProofSent = async function() {
+    if (!currentAuthUser || !currentWaitingTaskId) return;
+    const item = userWaitingTasksMap[currentWaitingTaskId] || {};
+
+    // STRICT GUARD: If already under checking, completely prevent duplicate submission
+    if (isTaskPendingReview(item.status)) {
+        window.showToast("Yeh task already checking ke liye submitted hai! Admin ke verify/reject hone ka intezar karein.", "error");
+        return;
+    }
+
+    window.showLoader();
+    const userEmail = currentAuthUser.email || currentUserData?.email || 'N/A';
+    const isResubmission = isTaskRejected(item.status);
+
+    await db.ref('taskSubmissions').push({
+        userId: currentAuthUser.uid,
+        userName: currentUserData?.name || 'User',
+        userEmail: userEmail,
+        userUid: currentUserData?.uid || 'N/A',
+        taskId: currentWaitingTaskId,
+        taskTitle: item.title || 'App Task',
+        reward: item.reward || 0,
+        date: new Date().toLocaleDateString(),
+        timestamp: Date.now(),
+        status: 'Wait for checking',
+        type: isResubmission ? 'Group Proof Re-Submission' : 'Group Proof Verification',
+        details: `${isResubmission ? '[RESUBMISSION] ' : ''}Sent Proof in Group with UID: ${currentUserData?.uid || 'N/A'}`
+    });
+
+    // Mark as submitted in waitingTasks
+    await db.ref(`waitingTasks/${currentAuthUser.uid}/${currentWaitingTaskId}`).update({
+        status: 'Proof Sent (Wait for checking)',
+        lastSubmittedAt: Date.now()
+    });
+
+    window.hideLoader();
+    window.closeWaitingProofModal();
+    window.playSound('win');
+    window.showToast("Task proof confirmation submitted! Admin checking ke baad approve ya reject karenge.", "success");
+};
+
+// ================= TASK ENGINE =================
+function getApprovedTaskCount() {
+    let count = 0;
+    for (let k in userSubmissionsMap) {
+        if (userSubmissionsMap[k] && (userSubmissionsMap[k].prio === 3 || String(userSubmissionsMap[k].status).toLowerCase().includes('approved') || String(userSubmissionsMap[k].status).toLowerCase().includes('success'))) {
+            count++;
+        }
+    }
+    return count;
+}
+
+window.checkAndOpenArrowPuzzle = function() {
+    const approvedCount = getApprovedTaskCount();
+    const isBypassed = currentUserData && currentUserData.taskBypass;
+
+    if (approvedCount < 2 && !isBypassed) {
+        alert(`🔒 ARROW PUZZLE LOCKED!\n\nPuzzle Game khelne ke liye pehle Tasks section mein jakar kam se kam 2 tasks complete karein aur admin dwara approve karwayein.\n\nAapne abhi tak ${approvedCount}/2 tasks complete kiye hain.`);
+        window.switchTab('tasks');
+        return;
+    }
+    window.openArrowGameModal();
+};
+
+window.openArrowGameModal = function() {
+    document.getElementById('arrow-game-container').classList.remove('hidden');
+    document.getElementById('arrow-game-container').classList.add('flex');
+    puzzleUI.showScreen('screen-levels');
+};
+window.closeArrowGameModal = function() {
+    document.getElementById('arrow-game-container').classList.add('hidden');
+    document.getElementById('arrow-game-container').classList.remove('flex');
+};
+
+function listenTasks() {
+    db.ref('tasks').on('value', snap => {
+        tasksList = [];
+        if (snap.exists()) {
+            snap.forEach(c => {
+                if (c.val().active) tasksList.push({ id: c.key, ...c.val() });
+            });
+        }
+        renderTasksUI();
+    });
+}
+
+function renderTasksUI() {
+    const container = document.getElementById('task-list-container');
+    if (!container) return;
+    if (tasksList.length === 0) {
+        container.innerHTML = `<div class="p-8 text-center text-slate-400 my-auto"><h4 class="text-sm font-black text-white">No tasks available right now</h4><p class="text-xs text-slate-400 mt-1">Please check back later</p></div>`;
+        return;
+    }
+
+    let html = '<div class="p-4 space-y-3.5">';
+    tasksList.forEach(t => {
+        const sub = userSubmissionsMap[t.id];
+        let btnText = 'START TASK';
+        let btnClass = 'glow-btn-green text-slate-950';
+        let disabled = '';
+
+        if (sub) {
+            if (sub.prio === 3) { btnText = 'COMPLETED'; btnClass = 'bg-emerald-500/20 text-emerald-400 border border-emerald-400/40'; disabled = 'disabled'; }
+            else if (sub.prio === 1) { btnText = 'RETRY TASK'; btnClass = 'bg-rose-600 text-white'; }
+            else { btnText = 'CHECKING...'; btnClass = 'bg-amber-500/20 text-amber-300 border border-amber-400/40'; disabled = 'disabled'; }
+        }
+
+        const taskImgSrc = (t.imageUrl && t.imageUrl.trim() !== '') ? t.imageUrl : 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=400&auto=format&fit=crop';
+
+        html += `
+            <div class="glass-panel p-4 rounded-3xl border border-emerald-500/20 space-y-3 shadow-lg">
+                <div class="flex items-center gap-3.5">
+                    <div class="w-14 h-14 rounded-2xl bg-black/40 overflow-hidden shrink-0 border border-emerald-500/30">
+                        <img src="${taskImgSrc}" class="w-full h-full object-cover" onerror="this.src='https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=400&auto=format&fit=crop'">
+                    </div>
+                    <div class="flex-1 min-w-0">
+                        <h4 class="font-black text-white text-xs truncate">${t.title}</h4>
+                        <div class="flex items-center gap-2 mt-1">
+                            <span class="text-[10px] font-black text-amber-300 bg-amber-400/10 px-2 py-0.5 rounded-md"><i class="fas fa-coins text-amber-400"></i> ${t.reward} Coins</span>
+                            <span class="text-[9.5px] text-slate-400">${t.seatsLeft !== undefined ? t.seatsLeft : '∞'} Seats</span>
+                        </div>
+                    </div>
+                </div>
+                <button ${disabled} onclick="playSound('click'); startTaskFlow('${t.id}')" class="w-full py-3 rounded-xl font-black text-xs uppercase tracking-wider ${btnClass} active:scale-95 transition-transform flex items-center justify-center gap-1.5">
+                    ${btnText} <i class="fas fa-arrow-right text-[10px]"></i>
+                </button>
+            </div>
+        `;
+    });
+    container.innerHTML = html + '</div>';
+}
+
+window.startTaskFlow = function(taskId) {
+    currentSelectedTask = tasksList.find(t => t.id === taskId);
+    if (!currentSelectedTask) return;
+    document.getElementById('full-task-title').innerText = currentSelectedTask.title;
+    document.getElementById('full-task-desc').innerText = currentSelectedTask.description;
+    document.getElementById('full-task-reward').innerText = currentSelectedTask.reward;
+    
+    const fullImg = document.getElementById('full-task-img');
+    if (fullImg) fullImg.src = (currentSelectedTask.imageUrl && currentSelectedTask.imageUrl.trim() !== '') ? currentSelectedTask.imageUrl : 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=600&auto=format&fit=crop';
+
+    document.getElementById('task-step-1-ui').classList.remove('hidden');
+    document.getElementById('task-step-2-notice').classList.add('hidden');
+    document.getElementById('submit-section-container').classList.add('hidden');
+    document.getElementById('task-full-page').classList.remove('hidden');
+};
+window.closeTaskFullPage = function() {
+    document.getElementById('task-full-page').classList.add('hidden');
+};
+
+// When user clicks DOWNLOAD APP NOW -> Task goes to WAITING TASKS!
+window.startTaskTimerAndOpenLink = async function() {
+    if (currentSelectedTask?.appLink) window.open(currentSelectedTask.appLink, '_blank');
+    document.getElementById('task-step-1-ui').classList.add('hidden');
+    document.getElementById('task-step-2-notice').classList.remove('hidden');
+    document.getElementById('submit-section-container').classList.remove('hidden');
+
+    // Add to waiting tasks in Firebase
+    if (currentAuthUser && currentSelectedTask) {
+        const existing = userWaitingTasksMap[currentSelectedTask.id];
+        // Preserve pending review or rejection status if already submitted
+        if (!existing || (!isTaskPendingReview(existing.status) && !isTaskRejected(existing.status))) {
+            await db.ref(`waitingTasks/${currentAuthUser.uid}/${currentSelectedTask.id}`).set({
+                id: currentSelectedTask.id,
+                title: currentSelectedTask.title,
+                reward: currentSelectedTask.reward,
+                appLink: currentSelectedTask.appLink || '',
+                date: new Date().toLocaleDateString(),
+                timestamp: Date.now(),
+                status: 'Waiting for proof'
+            });
+        }
+        window.showToast("Task added to Waiting Tasks! Check the Waiting Task tab.", "success");
+    }
+};
+
+window.submitActionTaskFull = async function() {
+    if (!currentAuthUser || !currentSelectedTask) return;
+    const num = document.getElementById('full-action-reg-num').value.trim();
+    const uid = document.getElementById('full-action-uid').value.trim();
+    if (!num || !uid) { window.showToast("Enter Registered Number & UID", "error"); return; }
+
+    const existing = userWaitingTasksMap[currentSelectedTask.id];
+    if (existing && isTaskPendingReview(existing.status)) {
+        window.showToast("Yeh task already checking ke liye submitted hai! Admin ke review ka intezar karein.", "error");
+        return;
+    }
+
+    window.showLoader();
+    const userEmail = currentAuthUser?.email || currentUserData?.email || 'N/A';
+    const isResubmission = existing && isTaskRejected(existing.status);
+
+    await db.ref('taskSubmissions').push({
+        userId: currentAuthUser.uid,
+        userName: currentUserData?.name || 'User',
+        userEmail: userEmail,
+        userUid: currentUserData?.uid || 'N/A',
+        taskId: currentSelectedTask.id,
+        taskTitle: currentSelectedTask.title,
+        reward: currentSelectedTask.reward,
+        date: new Date().toLocaleDateString(),
+        timestamp: Date.now(),
+        status: 'Wait for checking',
+        type: isResubmission ? 'In-App Re-Submission' : 'In-App Proof Submission',
+        details: `${isResubmission ? '[RESUBMISSION] ' : ''}Num: ${num} | AppUID: ${uid}`
+    });
+
+    await db.ref(`waitingTasks/${currentAuthUser.uid}/${currentSelectedTask.id}`).update({
+        id: currentSelectedTask.id,
+        title: currentSelectedTask.title,
+        reward: currentSelectedTask.reward,
+        status: 'Proof Sent (Wait for checking)',
+        lastSubmittedAt: Date.now()
+    });
+
+    window.hideLoader();
+    window.closeTaskFullPage();
+    window.playSound('win');
+    window.showToast("Task proof submitted for review! Admin checking karenge.", "success");
+};
+
+// ================= DEDICATED DAILY CODE TASKS (FIXED 5 COINS PER LEVEL) =================
+function computeDailyLevelCode(levelId, customDateSalt = null, adminSeed = 101) {
+    const dateStr = customDateSalt || new Date().toISOString().slice(0, 10);
+    let hash = adminSeed;
+    const combo = `LVL_${levelId}_DATE_${dateStr}_SEED_${adminSeed}`;
+    for (let i = 0; i < combo.length; i++) {
+        hash = ((hash << 5) - hash) + combo.charCodeAt(i);
+        hash |= 0;
+    }
+    let codeNum = Math.abs(hash) % 90000 + 10000;
+    return codeNum.toString();
+}
+
+window.openDailyCodeTasksScreen = function() {
+    document.getElementById('daily-code-tasks-screen').classList.remove('hidden');
+    document.getElementById('daily-code-tasks-screen').classList.add('flex');
+    renderDailyCodeTasksGrid();
+};
+window.closeDailyCodeTasksScreen = function() {
+    document.getElementById('daily-code-tasks-screen').classList.add('hidden');
+    document.getElementById('daily-code-tasks-screen').classList.remove('flex');
+};
+
+window.changeDailyCodePage = function(delta) {
+    dailyCodeCurrentPage = Math.max(0, dailyCodeCurrentPage + delta);
+    renderDailyCodeTasksGrid();
+};
+
+function renderDailyCodeTasksGrid() {
+    const container = document.getElementById('daily-code-full-grid');
+    if (!container) return;
+    container.innerHTML = '';
+
+    const pageSize = 50;
+    const startLvl = dailyCodeCurrentPage * pageSize + 1;
+    const endLvl = startLvl + pageSize - 1;
+
+    document.getElementById('code-page-indicator').innerText = `Levels ${startLvl} - ${endLvl}`;
+    document.getElementById('btn-code-prev-page').disabled = dailyCodeCurrentPage === 0;
+
+    const completedList = currentUserData?.dailyLevelsCompleted || [];
+    const highestCleared = completedList.length > 0 ? Math.max(...completedList) : 0;
+    const currentUnlockedLevel = highestCleared + 1;
+
+    // Requirement: हर level पर केवल 5 Coins मिलेंगे
+    const reward = 5;
+
+    for (let lvl = startLvl; lvl <= endLvl; lvl++) {
+        const isDone = completedList.includes(lvl);
+        const isLocked = lvl > currentUnlockedLevel;
+
+        const card = document.createElement('div');
+        card.className = `glass-panel rounded-2xl p-4 flex flex-col justify-between border ${isDone ? 'border-emerald-500/50 bg-emerald-950/20' : (isLocked ? 'border-white/5 opacity-50 cursor-not-allowed' : 'border-emerald-500/30 cursor-pointer active:scale-95')}`;
+        
+        if (!isLocked) {
+            card.onclick = () => { window.playSound('click'); openLevelCodeModal(lvl, reward, isDone); };
+        }
+
+        card.innerHTML = `
+            <div class="flex items-start justify-between">
+                <span class="text-xs font-black uppercase text-white">Level ${lvl}</span>
+                <span class="text-[9.5px] font-black text-amber-300 bg-amber-400/10 border border-amber-400/20 px-2 py-0.5 rounded-md flex items-center gap-1">
+                    <i class="fas fa-coins text-amber-400"></i> +${reward}
+                </span>
+            </div>
+            <div class="mt-4 flex items-center justify-between">
+                <span class="text-xs font-black ${isDone ? 'text-emerald-400' : (isLocked ? 'text-slate-500' : 'text-cyan-300')}">
+                    ${isDone ? '<i class="fas fa-check-circle mr-1"></i> SOLVED' : (isLocked ? '<i class="fas fa-lock mr-1"></i> LOCKED' : 'ENTER CODE')}
+                </span>
+                <i class="fas ${isDone ? 'fa-check text-emerald-400' : (isLocked ? 'fa-lock text-slate-500' : 'fa-arrow-right text-cyan-300')} text-xs"></i>
+            </div>
+        `;
+        container.appendChild(card);
+    }
+}
+
+function openLevelCodeModal(lvl, reward, isDone) {
+    if (isDone) {
+        window.showToast(`Level ${lvl} already solved and credited!`, 'info');
+        return;
+    }
+    currentVerifyingLevel = lvl;
+    document.getElementById('code-modal-badge').innerText = `LEVEL ${lvl} VERIFICATION`;
+    document.getElementById('code-modal-title').innerText = `Enter Level ${lvl} Code`;
+    document.getElementById('code-modal-reward').innerHTML = `<i class="fas fa-coins text-amber-400"></i> 5 Coins`;
+    document.getElementById('input-level-code').value = '';
+    document.getElementById('level-code-modal').classList.remove('hidden');
+    document.getElementById('level-code-modal').classList.add('flex');
+}
+
+window.closeLevelCodeModal = function() {
+    document.getElementById('level-code-modal').classList.add('hidden');
+    document.getElementById('level-code-modal').classList.remove('flex');
+};
+
+window.verifyAndSubmitLevelCode = async function() {
+    const entered = document.getElementById('input-level-code').value.trim();
+    if (!entered || entered.length !== 5) {
+        window.showToast('Enter a valid 5-digit code!', 'error');
+        return;
+    }
+
+    const adminSeed = appSettings.dailyCodeMasterSeed || 101;
+    const correctCode = computeDailyLevelCode(currentVerifyingLevel, null, adminSeed);
+
+    if (entered !== correctCode) {
+        window.showToast('Invalid Code! Check daily code from Admin link.', 'error');
+        window.playSound('click');
+        return;
+    }
+
+    window.showLoader();
+    const lvl = currentVerifyingLevel;
+    // Strictly 5 Coins per Level
+    const reward = 5;
+    
+    let completed = currentUserData?.dailyLevelsCompleted || [];
+    if (!completed.includes(lvl)) completed.push(lvl);
+
+    const newBal = Number(currentUserData?.balance || 0) + reward;
+
+    await db.ref('users/' + currentAuthUser.uid).update({
+        balance: newBal,
+        dailyLevelsCompleted: completed
+    });
+
+    await db.ref('transactions/' + currentAuthUser.uid).push({
+        type: `Level ${lvl} Passcode Reward`,
+        amount: reward,
+        date: new Date().toLocaleDateString(),
+        status: 'Success'
+    });
+
+    // Sync to Tournament: tournament is now strictly based on Code Levels Cleared!
+    const currentTourneyId = getCurrentTournamentCycleId();
+    await db.ref(`tournaments/${currentTourneyId}/participants/${currentAuthUser.uid}`).update({
+        name: currentUserData?.name || 'User',
+        uid: currentUserData?.uid || 'N/A',
+        avatar: currentUserData?.avatar || '',
+        levels: completed.length,
+        lastUpdated: Date.now()
+    });
+
+    window.hideLoader();
+    window.closeLevelCodeModal();
+    window.playSound('win');
+    window.showToast(`🎉 Level ${lvl} Solved! +5 Coins Credited!`, 'success');
+    renderDailyCodeTasksGrid();
+};
+
+// ================= 7-DAY CODE TOURNAMENT SYSTEM =================
+function getCurrentTournamentCycleId() {
+    // 7-day cycle: 7 * 86400000 ms
+    const cycleDuration = 7 * 24 * 60 * 60 * 1000;
+    const anchor = appSettings.tournamentCycleStart || 1700000000000;
+    const cycleNum = Math.floor((Date.now() - anchor) / cycleDuration);
+    return `CYCLE_7D_${cycleNum}`;
+}
+
+function updateTournamentCountdown() {
+    const cycleDuration = 7 * 24 * 60 * 60 * 1000;
+    const anchor = appSettings.tournamentCycleStart || 1700000000000;
+    const elapsed = (Date.now() - anchor) % cycleDuration;
+    const remaining = cycleDuration - elapsed;
+
+    const days = Math.floor(remaining / (24 * 60 * 60 * 1000));
+    const hours = Math.floor((remaining % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
+    const mins = Math.floor((remaining % (60 * 60 * 1000)) / (60 * 1000));
+    const secs = Math.floor((remaining % (60 * 1000)) / 1000);
+
+    const el = document.getElementById('tournament-cycle-countdown');
+    if (el) el.innerText = `Season Ends in: ${days}d ${hours}h ${mins}m ${secs}s`;
+}
+setInterval(updateTournamentCountdown, 1000);
+
+window.joinTournamentRealtime = async function() {
+    if (!currentAuthUser || !currentUserData) return;
+    const currentTourneyId = getCurrentTournamentCycleId();
+    window.showLoader();
+    // Strictly code-completed levels
+    const codeLevelsCount = (currentUserData.dailyLevelsCompleted || []).length;
+    await db.ref(`tournaments/${currentTourneyId}/participants/${currentAuthUser.uid}`).set({
+        name: currentUserData.name || 'User',
+        uid: currentUserData.uid || '00000',
+        avatar: currentUserData.avatar || '',
+        levels: codeLevelsCount,
+        joinedAt: Date.now()
+    });
+    window.hideLoader();
+    window.showToast("Joined 7-Day Code Tournament Cup!", "success");
+};
+
+function listenTournamentRealtime() {
+    const currentTourneyId = getCurrentTournamentCycleId();
+    db.ref(`tournaments/${currentTourneyId}/participants`).on('value', snap => {
+        const container = document.getElementById('tournament-real-list-container');
+        if (!container) return;
+        container.innerHTML = '';
+        let participants = [];
+        if (snap.exists()) {
+            snap.forEach(child => participants.push({ key: child.key, ...child.val() }));
+        }
+        document.getElementById('tourney-real-player-count').innerText = `${participants.length} Real Players Joined`;
+        // Sort strictly by Code Levels Cleared!
+        participants.sort((a, b) => (b.levels || 0) - (a.levels || 0));
+
+        let userRank = -1;
+        let userLevels = 0;
+
+        participants.forEach((p, idx) => {
+            const rank = idx + 1;
+            const isMe = p.key === currentAuthUser?.uid;
+            if (isMe) {
+                userRank = rank;
+                userLevels = p.levels || 0;
+            }
+            container.innerHTML += `
+                <div class="glass-panel p-3 rounded-2xl flex items-center justify-between border ${isMe ? 'border-emerald-400 bg-emerald-500/10' : 'border-white/10'}">
+                    <div class="flex items-center gap-3">
+                        <span class="text-xs font-black text-amber-300 w-5 text-center">#${rank}</span>
+                        <div class="w-8 h-8 rounded-xl bg-black/40 overflow-hidden">
+                            <img src="${p.avatar || 'https://api.dicebear.com/7.x/adventurer/svg?seed=' + p.name}" class="w-full h-full object-cover">
+                        </div>
+                        <div>
+                            <div class="text-xs font-black text-white">${p.name} ${isMe ? '<span class="text-[8px] bg-emerald-500 text-slate-950 font-black px-1 rounded">YOU</span>' : ''}</div>
+                            <div class="text-[9px] text-slate-400 font-medium">UID: ${p.uid}</div>
+                        </div>
+                    </div>
+                    <span class="text-xs font-black text-emerald-400">${p.levels || 0} Code Levels</span>
+                </div>
+            `;
+        });
+
+        // Update bottom banner info
+        const myRankEl = document.getElementById('my-tourney-rank');
+        const myLevelsEl = document.getElementById('my-tourney-levels');
+        const prizeBadge = document.getElementById('my-estimated-prize-badge');
+
+        if (userRank > 0) {
+            if (myRankEl) myRankEl.innerText = `#${userRank}`;
+            if (myLevelsEl) myLevelsEl.innerText = userLevels;
+            let prize = '100 Coins';
+            if (userRank === 1) prize = '10,000 Coins 🏆';
+            else if (userRank === 2) prize = '5,000 Coins 🥈';
+            else if (userRank === 3) prize = '2,500 Coins 🥉';
+            else if (userRank <= 10) prize = '500 Coins';
+            if (prizeBadge) prizeBadge.innerText = `Your Prize: ${prize}`;
+        } else {
+            const currentCodeLevels = (currentUserData?.dailyLevelsCompleted || []).length;
+            if (myRankEl) myRankEl.innerText = `#--`;
+            if (myLevelsEl) myLevelsEl.innerText = currentCodeLevels;
+            if (prizeBadge) prizeBadge.innerText = `Join Cup to Win`;
+        }
+    });
+}
+
+window.openTournamentPage = function() {
+    document.getElementById('tournament-page').classList.remove('hidden');
+    document.getElementById('tournament-page').classList.add('flex');
+    listenTournamentRealtime();
+};
+window.closeTournamentPage = function() {
+    document.getElementById('tournament-page').classList.add('hidden');
+    document.getElementById('tournament-page').classList.remove('flex');
+};
+
+// ================= ROTATING PROMOTIONAL BANNERS =================
+function loadRotationalBanners() {
+    const track = document.getElementById('banner-track');
+    const dots = document.getElementById('banner-dots');
+    if (!track || !dots) return;
+
+    const banners = [
+        { icon: 'fa-bolt', tag: 'Small Tasks, Big Rewards!', title: 'Complete Daily <span class="text-emerald-400">Tasks</span>', desc: 'Finish easy campaigns & earn unlimited coins', btn: 'START NOW', action: "switchTab('tasks')" },
+        { icon: 'fa-trophy', tag: 'Weekly Mega Prize Pool', title: '7-Day Code <span class="text-amber-400">Cup</span>', desc: 'Climb tournament ranks & win 20,000+ pool', btn: 'JOIN CUP', action: "openTournamentPage()" },
+        { icon: 'fa-users', tag: 'Lifetime Passive Income', title: 'Invite Friends & <span class="text-cyan-400">Earn 5%</span>', desc: 'Earn 5% lifetime commission on all payouts', btn: 'REFER NOW', action: "openPage('referral-page')" }
+    ];
+
+    track.innerHTML = '';
+    dots.innerHTML = '';
+    track.style.width = (banners.length * 100) + '%';
+    const childW = 100 / banners.length;
+
+    banners.forEach((b, i) => {
+        track.innerHTML += `
+            <div class="h-full relative p-5 flex flex-col justify-between" style="width: ${childW}%;">
+                <div class="flex justify-between items-start">
+                    <div class="w-10 h-10 rounded-2xl bg-emerald-400/20 border border-emerald-400/40 flex items-center justify-center text-emerald-400 text-xl shadow-inner">
+                        <i class="fas ${b.icon}"></i>
+                    </div>
+                    <span class="text-[10px] font-black text-amber-300 italic">${b.tag}</span>
+                </div>
+                <div class="relative z-10">
+                    <h3 class="text-lg font-black text-white leading-tight">${b.title}</h3>
+                    <p class="text-[11px] text-slate-300 font-medium mt-0.5">${b.desc}</p>
+                    <div class="mt-3">
+                        <button onclick="playSound('click'); ${b.action}" class="glow-btn-green text-slate-950 font-black text-xs px-4 py-2.5 rounded-xl uppercase tracking-wider flex items-center gap-2 active:scale-95 shadow-md">
+                            ${b.btn} <i class="fas fa-arrow-right text-[10px]"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+        dots.innerHTML += `<span class="w-2 h-1.5 rounded-full ${i === 0 ? 'bg-emerald-400 w-4' : 'bg-white/30'} transition-all" id="banner-dot-${i}"></span>`;
+    });
+
+    if (bannerInterval) clearInterval(bannerInterval);
+    currentBannerIndex = 0;
+    bannerInterval = setInterval(() => {
+        currentBannerIndex = (currentBannerIndex + 1) % banners.length;
+        track.style.transform = `translateX(-${currentBannerIndex * childW}%)`;
+        banners.forEach((_, idx) => {
+            const d = document.getElementById('banner-dot-' + idx);
+            if (d) d.className = idx === currentBannerIndex ? 'w-4 h-1.5 rounded-full bg-emerald-400 transition-all' : 'w-2 h-1.5 rounded-full bg-white/30 transition-all';
+        });
+    }, 4000);
+}
+
+// ================= WITHDRAWAL SYSTEM (FIXED 3-STEP TIMELINE) =================
+window.selectWithdrawPreset = function(rupees, coins, el) {
+    selectedWithdrawRupees = rupees;
+    selectedWithdrawCoins = coins;
+    document.querySelectorAll('.tier-btn').forEach(b => b.classList.remove('border-emerald-400', 'bg-emerald-500/20'));
+    el.classList.add('border-emerald-400', 'bg-emerald-500/20');
+    document.getElementById('w-confirm-rupees').innerText = `₹${rupees}`;
+    document.getElementById('w-confirm-coins').innerText = `${coins.toLocaleString()} Coins`;
+};
+
+window.setWithdrawMethod = function(m) {
+    currentWithdrawMethod = m;
+    if (m === 'UPI') {
+        document.getElementById('w-method-upi').className = "py-3 rounded-xl bg-emerald-500 text-slate-950 font-black text-xs flex items-center justify-center gap-1.5";
+        document.getElementById('w-method-bank').className = "py-3 rounded-xl bg-white/10 text-slate-300 font-black text-xs flex items-center justify-center gap-1.5";
+        document.getElementById('w-field-upi').classList.remove('hidden');
+        document.getElementById('w-field-bank').classList.add('hidden');
+    } else {
+        document.getElementById('w-method-bank').className = "py-3 rounded-xl bg-emerald-500 text-slate-950 font-black text-xs flex items-center justify-center gap-1.5";
+        document.getElementById('w-method-upi').className = "py-3 rounded-xl bg-white/10 text-slate-300 font-black text-xs flex items-center justify-center gap-1.5";
+        document.getElementById('w-field-bank').classList.remove('hidden');
+        document.getElementById('w-field-upi').classList.add('hidden');
+    }
+};
+
+window.requestRestrictedWithdrawal = async function() {
+    if (!selectedWithdrawCoins || !selectedWithdrawRupees) {
+        window.showToast("Please select a preset amount!", "error"); return;
+    }
+    if (Number(currentUserData?.balance || 0) < selectedWithdrawCoins) {
+        window.showToast("Insufficient Coins balance!", "error"); return;
+    }
+
+    let payDetails = "";
+    if (currentWithdrawMethod === 'UPI') {
+        payDetails = document.getElementById('w-upi-input').value.trim();
+        if (!payDetails) { window.showToast("Enter your UPI ID!", "error"); return; }
+    } else {
+        const name = document.getElementById('w-bank-name').value.trim();
+        const acc = document.getElementById('w-bank-acc').value.trim();
+        const ifsc = document.getElementById('w-bank-ifsc').value.trim();
+        if (!name || !acc || !ifsc) { window.showToast("Fill all bank details!", "error"); return; }
+        payDetails = `Acc: ${acc} | IFSC: ${ifsc} | Holder: ${name}`;
+    }
+
+    window.showLoader();
+    const uid = currentAuthUser.uid;
+    const newBal = Number(currentUserData?.balance || 0) - selectedWithdrawCoins;
+
+    await db.ref('users/' + uid).update({ balance: newBal });
+    await db.ref('withdrawals').push({
+        userId: uid,
+        userName: currentUserData?.name || 'User',
+        userUid: currentUserData?.uid || 'N/A',
+        rupees: selectedWithdrawRupees,
+        coins: selectedWithdrawCoins,
+        method: currentWithdrawMethod,
+        details: payDetails,
+        date: new Date().toLocaleDateString(),
+        statusStep: 1,
+        statusText: 'Pending'
+    });
+
+    await db.ref('transactions/' + uid).push({
+        type: `Withdrawal ₹${selectedWithdrawRupees}`,
+        amount: selectedWithdrawCoins,
+        date: new Date().toLocaleDateString(),
+        status: 'Pending'
+    });
+
+    window.hideLoader();
+    window.playSound('win');
+    window.showToast("Withdrawal requested successfully!", "success");
+    window.closePage('withdraw-page');
+};
+
+function listenUserWithdrawalsTimeline(uid) {
+    db.ref('withdrawals').orderByChild('userId').equalTo(uid).on('value', snap => {
+        const container = document.getElementById('user-withdrawal-timeline-list');
+        if (!container) return;
+        container.innerHTML = '';
+        if (snap.exists()) {
+            snap.forEach(child => {
+                const w = child.val();
+                const step = w.statusStep || 1;
+                container.innerHTML += `
+                    <div class="glass-panel p-4 rounded-2xl border border-emerald-500/20 space-y-3 text-xs">
+                        <div class="flex justify-between items-start">
+                            <div>
+                                <div class="font-black text-white text-sm">₹${w.rupees} via ${w.method}</div>
+                                <div class="text-[10px] text-slate-400 font-semibold">${w.date} | ${w.coins} Coins Used</div>
+                            </div>
+                            <span class="text-[9px] font-black px-2.5 py-1 rounded-lg ${step === 3 ? 'bg-emerald-500/20 text-emerald-400' : (step === 2 ? 'bg-cyan-500/20 text-cyan-300' : 'bg-amber-500/20 text-amber-300')}">
+                                STEP ${step} OF 3
+                            </span>
+                        </div>
+                        <div class="flex items-center justify-between text-[9px] font-black pt-1">
+                            <span class="${step >= 1 ? 'text-amber-400' : 'text-slate-600'}">● Step 1: Pending</span>
+                            <span class="${step >= 2 ? 'text-cyan-400' : 'text-slate-600'}">● Step 2: Approved</span>
+                            <span class="${step === 3 ? 'text-emerald-400' : 'text-slate-600'}">● Step 3: Completed</span>
+                        </div>
+                    </div>
+                `;
+            });
+        } else {
+            container.innerHTML = `<p class="text-slate-500 text-xs text-center py-4">No withdrawals requested yet.</p>`;
+        }
+    });
+}
+
+// ================= PROFILE HISTORY FIX (ALL 5 SECTIONS WORKING) =================
+window.openHistoryModal = function(type) {
+    const modal = document.getElementById('history-modal');
+    const content = document.getElementById('history-modal-content');
+    const title = document.getElementById('history-modal-title');
+    if (!modal || !content || !title) return;
+
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+    content.innerHTML = '<div class="text-center py-4 text-xs text-slate-400"><i class="fas fa-spinner fa-spin mr-2"></i>Loading history...</div>';
+
+    if (type === 'tasks') {
+        title.innerText = "Task Records";
+        db.ref('taskSubmissions').orderByChild('userId').equalTo(currentAuthUser.uid).once('value', snap => {
+            content.innerHTML = '';
+            if (snap.exists()) {
+                snap.forEach(c => {
+                    const d = c.val();
+                    content.innerHTML += `
+                        <div class="glass-panel p-3.5 rounded-2xl flex justify-between items-center text-xs mb-2">
+                            <div>
+                                <div class="font-black text-white">${d.taskTitle}</div>
+                                <div class="text-[10px] text-slate-400">${d.date} | ${d.reward || 0} Coins</div>
+                            </div>
+                            <span class="font-black text-[10px] px-2 py-1 rounded-lg ${String(d.status).includes('Approved') || String(d.status).includes('Success') ? 'bg-emerald-500/20 text-emerald-400' : (String(d.status).includes('Reject') ? 'bg-rose-500/20 text-rose-400' : 'bg-amber-500/20 text-amber-300')}">${d.status}</span>
+                        </div>
+                    `;
+                });
+            } else {
+                content.innerHTML = "<p class='text-center py-4 text-xs text-slate-400'>No task records found.</p>";
+            }
+        });
+    } else if (type === 'earnings') {
+        title.innerText = "Coin Balance Logs";
+        db.ref('transactions/' + currentAuthUser.uid).once('value', snap => {
+            content.innerHTML = '';
+            if (snap.exists()) {
+                snap.forEach(c => {
+                    const d = c.val();
+                    content.innerHTML += `
+                        <div class="glass-panel p-3.5 rounded-2xl flex justify-between items-center text-xs mb-2">
+                            <div>
+                                <div class="font-black text-white">${d.type}</div>
+                                <div class="text-[10px] text-slate-400">${d.date}</div>
+                            </div>
+                            <span class="font-black text-emerald-400">+${d.amount} 🪙</span>
+                        </div>
+                    `;
+                });
+            } else {
+                content.innerHTML = "<p class='text-center py-4 text-xs text-slate-400'>No coin balance logs found.</p>";
+            }
+        });
+    } else if (type === 'spin') {
+        title.innerText = "Spin & Scratch Logs";
+        db.ref('transactions/' + currentAuthUser.uid).once('value', snap => {
+            content.innerHTML = '';
+            let hasItems = false;
+            if (snap.exists()) {
+                snap.forEach(c => {
+                    const d = c.val();
+                    if (d.type && (d.type.includes('Spin') || d.type.includes('Scratch'))) {
+                        hasItems = true;
+                        content.innerHTML += `
+                            <div class="glass-panel p-3.5 rounded-2xl flex justify-between items-center text-xs mb-2">
+                                <div>
+                                    <div class="font-black text-white">${d.type}</div>
+                                    <div class="text-[10px] text-slate-400">${d.date}</div>
+                                </div>
+                                <span class="font-black text-purple-400">+${d.amount} 🪙</span>
+                            </div>
+                        `;
+                    }
+                });
+            }
+            if (!hasItems) {
+                content.innerHTML = "<p class='text-center py-4 text-xs text-slate-400'>No spin or scratch rewards claimed yet.</p>";
+            }
+        });
+    } else if (type === 'withdrawal') {
+        // Fix requirement #13: Withdrawal History opens properly
+        title.innerText = "3-Step Withdrawal History";
+        db.ref('withdrawals').orderByChild('userId').equalTo(currentAuthUser.uid).once('value', snap => {
+            content.innerHTML = '';
+            if (snap.exists()) {
+                snap.forEach(child => {
+                    const w = child.val();
+                    const step = w.statusStep || 1;
+                    content.innerHTML += `
+                        <div class="glass-panel p-4 rounded-2xl border border-emerald-500/20 space-y-2.5 text-xs mb-2.5">
+                            <div class="flex justify-between items-start">
+                                <div>
+                                    <div class="font-black text-white text-sm">₹${w.rupees} via ${w.method}</div>
+                                    <div class="text-[10px] text-slate-400 font-semibold">${w.date} | ${w.coins} Coins Used</div>
+                                </div>
+                                <span class="text-[9px] font-black px-2.5 py-1 rounded-lg ${step === 3 ? 'bg-emerald-500/20 text-emerald-400' : (step === 2 ? 'bg-cyan-500/20 text-cyan-300' : 'bg-amber-500/20 text-amber-300')}">
+                                    STEP ${step} OF 3
+                                </span>
+                            </div>
+                            <div class="text-[10px] text-slate-300 font-mono bg-black/40 p-2 rounded">${w.details}</div>
+                            <div class="flex items-center justify-between text-[9px] font-black pt-1">
+                                <span class="${step >= 1 ? 'text-amber-400' : 'text-slate-600'}">● Step 1: Pending</span>
+                                <span class="${step >= 2 ? 'text-cyan-400' : 'text-slate-600'}">● Step 2: Approved</span>
+                                <span class="${step === 3 ? 'text-emerald-400' : 'text-slate-600'}">● Step 3: Completed</span>
+                            </div>
+                        </div>
+                    `;
+                });
+            } else {
+                content.innerHTML = "<p class='text-center py-4 text-xs text-slate-400'>No withdrawal requests found.</p>";
+            }
+        });
+    }
+};
+
+window.closeHistoryModal = function() {
+    const modal = document.getElementById('history-modal');
+    if (modal) { modal.classList.add('hidden'); modal.classList.remove('flex'); }
+};
+
+// ================= USER INITIALIZATION & DATA HANDLERS =================
+auth.onAuthStateChanged(user => {
+    if (user) {
+        currentAuthUser = user;
+        document.getElementById('auth-screen')?.classList.add('hidden');
+        loadUserData(user.uid);
+        listenUserWithdrawalsTimeline(user.uid);
+        listenTournamentRealtime();
+        listenUserWaitingTasks(user.uid);
+    } else {
+        currentAuthUser = null;
+        document.getElementById('auth-screen')?.classList.remove('hidden');
+        document.getElementById('auth-screen')?.classList.add('flex');
+    }
+});
+
+function loadUserData(uid) {
+    window.showLoader();
+    db.ref('users/' + uid).on('value', snap => {
+        window.hideLoader();
+        if (snap.exists()) {
+            currentUserData = snap.val();
+            updateUIWithUserData();
+            loadReferralData();
+            renderDailyCodeTasksGrid();
+        }
+    });
+    listenTasks();
+    listenUserSubmissions();
+    listenUserTransactions();
+}
+
+function listenUserSubmissions() {
+    if (!currentAuthUser) return;
+    db.ref('taskSubmissions').orderByChild('userId').equalTo(currentAuthUser.uid).on('value', snap => {
+        let temp = {};
+        if (snap.exists()) {
+            snap.forEach(c => {
+                let sub = c.val();
+                let prio = 2;
+                let st = (sub.status || '').toLowerCase();
+                if (st.includes('reject')) prio = 1;
+                else if (st.includes('success') || st.includes('approved')) prio = 3;
+                temp[sub.taskId] = { status: sub.status, prio: prio };
+            });
+        }
+        userSubmissionsMap = temp;
+        renderTasksUI();
+        updateUIWithUserData();
+    });
+}
+
+// Requirement #15: Registered Gmail is properly shown
+function updateUIWithUserData() {
+    if (!currentUserData && !currentAuthUser) return;
+    const name = currentUserData?.name || currentAuthUser?.displayName || 'User';
+    const uid = currentUserData?.uid || '66913';
+    const email = currentAuthUser?.email || currentUserData?.email || 'user@gmail.com';
+
+    if (document.getElementById('header-name')) document.getElementById('header-name').innerText = name;
+    if (document.getElementById('header-uid')) document.getElementById('header-uid').innerText = uid;
+    
+    // Fix Profile Name, Email & UID
+    if (document.getElementById('profile-name')) document.getElementById('profile-name').innerText = name;
+    if (document.getElementById('profile-email')) document.getElementById('profile-email').innerText = email;
+    if (document.getElementById('profile-uid')) document.getElementById('profile-uid').innerText = uid;
+
+    const bal = Number(currentUserData?.balance || 0);
+    if (document.getElementById('header-balance')) document.getElementById('header-balance').innerText = `${bal} Coins`;
+    if (document.getElementById('wallet-total-balance')) document.getElementById('wallet-total-balance').innerText = `${bal} Coins`;
+    if (document.getElementById('withdraw-avail-bal')) document.getElementById('withdraw-avail-bal').innerText = `${bal} Coins`;
+    if (document.getElementById('ref-code-display')) document.getElementById('ref-code-display').innerText = uid;
+
+    const approvedCount = getApprovedTaskCount();
+    const pSub = document.getElementById('puzzle-lock-subtitle');
+    if (pSub) {
+        pSub.innerText = (approvedCount >= 2 || currentUserData?.taskBypass) ? "Unlocked & Ready to Play" : `Complete 2 Tasks (${approvedCount}/2)`;
+    }
+
+    if (currentUserData?.avatar) {
+        if (document.getElementById('header-avatar-img')) document.getElementById('header-avatar-img').src = currentUserData.avatar;
+        if (document.getElementById('profile-avatar-img')) document.getElementById('profile-avatar-img').src = currentUserData.avatar;
+    }
+
+    // Automatic 24h / 12:00 AM Midnight Spin & Scratch Refresh
+    checkAndResetDailySpinAndScratch();
+}
+
+window.switchAuthTab = function(tab) {
+    document.getElementById('login-form').classList.toggle('hidden', tab !== 'login');
+    document.getElementById('register-form').classList.toggle('hidden', tab === 'login');
+    document.getElementById('tab-login-btn').className = tab === 'login' ? "flex-1 py-2.5 text-xs font-black rounded-xl bg-emerald-500 text-slate-950 shadow-md" : "flex-1 py-2.5 text-xs font-black rounded-xl text-slate-400";
+    document.getElementById('tab-register-btn').className = tab !== 'login' ? "flex-1 py-2.5 text-xs font-black rounded-xl bg-emerald-500 text-slate-950 shadow-md" : "flex-1 py-2.5 text-xs font-black rounded-xl text-slate-400";
+};
+
+window.handleLogin = function(e) {
+    e.preventDefault();
+    window.showLoader();
+    auth.signInWithEmailAndPassword(document.getElementById('login-email').value, document.getElementById('login-password').value)
+        .catch(err => { window.hideLoader(); window.showToast(err.message, 'error'); });
+};
+
+window.handleRegister = async function(e) {
+    e.preventDefault();
+    window.showLoader();
+    try {
+        const email = document.getElementById('reg-email').value.trim();
+        const res = await auth.createUserWithEmailAndPassword(email, document.getElementById('reg-password').value);
+        const refCode = document.getElementById('reg-referral').value.trim();
+        await db.ref('users/' + res.user.uid).set({
+            name: document.getElementById('reg-name').value.trim(),
+            mobile: document.getElementById('reg-mobile').value.trim(),
+            email: email,
+            uid: Math.floor(10000 + Math.random() * 90000).toString(),
+            balance: 500,
+            spinsLeft: 3,
+            lastSpinDate: new Date().toLocaleDateString(),
+            status: 'Active',
+            referredByL1: refCode || '',
+            refEarnings: 0,
+            dailyLevelsCompleted: [],
+            joinedDate: new Date().toLocaleDateString()
+        });
+        window.hideLoader();
+        window.showToast("Account Created! +500 Coins Bonus", "success");
+    } catch(err) {
+        window.hideLoader(); window.showToast(err.message, 'error');
+    }
+};
+
+window.switchTab = function(tab) {
+    ['main-content', 'tasks-page', 'spin-page', 'rewards-page', 'profile-page', 'wallet-page', 'withdraw-page', 'referral-page'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) { el.classList.add('hidden'); el.classList.remove('flex'); }
+    });
+    ['nav-home', 'nav-tasks', 'nav-rewards', 'nav-profile'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) { el.classList.remove('text-emerald-400'); el.classList.add('text-slate-400'); }
+    });
+
+    if (tab === 'home') { document.getElementById('main-content')?.classList.remove('hidden'); document.getElementById('nav-home')?.classList.add('text-emerald-400'); }
+    else if (tab === 'tasks') { document.getElementById('tasks-page')?.classList.remove('hidden'); document.getElementById('tasks-page')?.classList.add('flex'); document.getElementById('nav-tasks')?.classList.add('text-emerald-400'); }
+    else if (tab === 'rewards') { document.getElementById('rewards-page')?.classList.remove('hidden'); document.getElementById('rewards-page')?.classList.add('flex'); document.getElementById('nav-rewards')?.classList.add('text-emerald-400'); }
+};
+
+window.copyUID = function(e) { if (e) e.stopPropagation(); navigator.clipboard.writeText(currentUserData?.uid || ''); window.showToast('UID Copied', 'success'); };
+window.copyReferralCode = function() { navigator.clipboard.writeText(currentUserData?.uid || ''); window.showToast('Code Copied', 'success'); };
+
+window.copyReferralLink = function() {
+    const base = appSettings.referralLink || 'https://earnpro.app/';
+    const finalUrl = `${base}${base.includes('?') ? '&' : '?'}ref=${currentUserData?.uid || ''}`;
+    navigator.clipboard.writeText(finalUrl);
+    window.showToast('Referral Link Copied', 'success');
+};
+
+window.shareReferral = function() {
+    const base = appSettings.referralLink || 'https://earnpro.app/';
+    const finalUrl = `${base}${base.includes('?') ? '&' : '?'}ref=${currentUserData?.uid || ''}`;
+    navigator.clipboard.writeText(`Join EarnPro & get bonus coins: ${finalUrl}`);
+    window.showToast('Share message copied', 'success');
+};
+
+function loadReferralData() {
+    if (!currentUserData?.uid) return;
+    db.ref('users').orderByChild('referredByL1').equalTo(String(currentUserData.uid)).on('value', snap => {
+        const container = document.getElementById('referral-list-container');
+        if (!container) return;
+        container.innerHTML = '';
+        let count = 0;
+        if (snap.exists()) {
+            snap.forEach(c => {
+                count++;
+                const u = c.val();
+                container.innerHTML += `
+                    <div class="glass-panel p-3 rounded-2xl flex items-center justify-between text-xs">
+                        <div><div class="font-black text-white">${u.name}</div><div class="text-[10px] text-slate-400">UID: ${u.uid}</div></div>
+                        <span class="text-[10px] font-black text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded">5% Active</span>
+                    </div>
+                `;
+            });
+        } else {
+            container.innerHTML = `<p class="text-xs text-slate-500 text-center py-4">No referrals joined yet.</p>`;
+        }
+        document.getElementById('ref-total-count').innerText = count;
+        document.getElementById('ref-active-count').innerText = count;
+        document.getElementById('ref-total-earnings').innerText = `${currentUserData.refEarnings || 0} Coins`;
+    });
+}
+
+function listenUserTransactions() {
+    db.ref('transactions/' + currentAuthUser.uid).on('value', snap => {
+        const list = document.getElementById('transaction-list');
+        if (!list) return;
+        list.innerHTML = '';
+        if (snap.exists()) {
+            snap.forEach(c => {
+                const tx = c.val();
+                list.innerHTML += `
+                    <div class="glass-panel p-3.5 rounded-2xl flex justify-between items-center text-xs">
+                        <div><div class="font-black text-white">${tx.type}</div><div class="text-[10px] text-slate-400">${tx.date}</div></div>
+                        <span class="font-black text-amber-400">+${tx.amount} Coins</span>
+                    </div>
+                `;
+            });
+        } else {
+            list.innerHTML = `<p class="text-xs text-slate-500 text-center py-4">No transactions yet.</p>`;
+        }
+    });
+}
+
+// ================= ADMIN FUNCTIONS =================
+window.triggerAdminAuthPrompt = function() {
+    const pin = prompt("Enter Master Admin Security PIN (Default: 7788):");
+    if (pin === "7788") {
+        sessionStorage.setItem('earnpro_admin_authed', 'true');
+        openAdminPanel();
+    } else if (pin !== null) {
+        window.showToast("Invalid PIN!", "error");
+    }
+};
+
+function openAdminPanel() {
+    document.getElementById('admin-panel-modal').classList.remove('hidden');
+    document.getElementById('admin-panel-modal').classList.add('flex');
+    renderAdminLevelsList();
+    renderAdminWithdrawals();
+    renderAdminTaskProofs();
+}
+window.closeAdminPanel = function() {
+    document.getElementById('admin-panel-modal').classList.add('hidden');
+    document.getElementById('admin-panel-modal').classList.remove('flex');
+};
+
+window.switchAdminTab = function(tab) {
+    ['levels', 'taskproofs', 'withdrawals', 'referrals', 'system'].forEach(t => {
+        document.getElementById(`adm-sec-${t}`)?.classList.add('hidden');
+        document.getElementById(`adm-tab-${t}`)?.classList.remove('border-emerald-400', 'text-emerald-400');
+        document.getElementById(`adm-tab-${t}`)?.classList.add('border-transparent', 'text-slate-400');
+    });
+    document.getElementById(`adm-sec-${tab}`)?.classList.remove('hidden');
+    document.getElementById(`adm-tab-${tab}`)?.classList.add('border-emerald-400', 'text-emerald-400');
+    document.getElementById(`adm-tab-${tab}`)?.classList.remove('border-transparent', 'text-slate-400');
+};
+
+function renderAdminLevelsList() {
+    const container = document.getElementById('admin-level-rows-container');
+    if (!container) return;
+    container.innerHTML = '';
+    const seed = appSettings.dailyCodeMasterSeed || 101;
+    for (let lvl = 1; lvl <= 50; lvl++) {
+        const code = computeDailyLevelCode(lvl, null, seed);
+        const row = document.createElement('div');
+        row.className = "flex items-center justify-between p-2.5 bg-black/40 rounded-xl border border-emerald-500/20 text-xs";
+        row.innerHTML = `
+            <span class="font-black text-white w-14">Lvl ${lvl}</span>
+            <span class="font-black text-amber-300 tracking-wider bg-amber-400/10 px-2.5 py-1 rounded-lg border border-amber-400/30">${code}</span>
+            <span class="text-amber-400 font-bold">5 Coins</span>
+            <span class="text-[9px] text-emerald-400 font-bold">Active</span>
+        `;
+        container.appendChild(row);
+    }
+}
+
+window.adminForceUpdateAllCodes = function() {
+    if (!confirm("Regenerate all daily 5-digit codes now? Previous codes will become immediately invalid.")) return;
+    const newSeed = Math.floor(Math.random() * 900000 + 100000);
+    db.ref('settings/dailyCodeMasterSeed').set(newSeed).then(() => {
+        window.showToast("All daily codes refreshed across network!", "success");
+        renderAdminLevelsList();
+        renderDailyCodeTasksGrid();
+    });
+};
+
+window.toggleMaintenanceFromAdmin = function() {
+    const current = appSettings.maintenanceMode === true;
+    db.ref('settings/maintenanceMode').set(!current).then(() => {
+        window.showToast(`Maintenance mode turned ${!current ? 'ON' : 'OFF'}`, 'info');
+    });
+};
+
+// Admin Section 2: Task Proofs (Confirm / Reject)
+function renderAdminTaskProofs() {
+    db.ref('taskSubmissions').on('value', snap => {
+        const container = document.getElementById('admin-taskproofs-list');
+        const countEl = document.getElementById('admin-taskproofs-count');
+        if (!container) return;
+        container.innerHTML = '';
+        let pending = 0;
+
+        if (snap.exists()) {
+            snap.forEach(child => {
+                const sub = child.val();
+                const key = child.key;
+                const isPending = sub.status === 'Wait for checking';
+                if (isPending) pending++;
+
+                container.innerHTML += `
+                    <div class="glass-panel p-3.5 rounded-2xl border border-emerald-500/20 space-y-2.5 text-xs">
+                        <div class="flex justify-between items-start">
+                            <div>
+                                <h4 class="font-black text-white">${sub.taskTitle}</h4>
+                                <div class="text-[10px] text-slate-300">User: ${sub.userName} (UID: ${sub.userUid})</div>
+                                <div class="text-[9.5px] text-slate-400">${sub.userEmail || ''} | ${sub.date}</div>
+                            </div>
+                            <span class="font-black text-amber-300 bg-amber-400/10 px-2 py-0.5 rounded">+${sub.reward} 🪙</span>
+                        </div>
+                        <div class="p-2 bg-black/40 rounded-xl text-[10px] text-slate-300 font-mono">${sub.details || 'Proof submitted'}</div>
+                        <div class="flex items-center justify-between pt-1">
+                            <span class="text-[10px] font-bold ${sub.status === 'Approved' ? 'text-emerald-400' : (sub.status === 'Rejected' ? 'text-rose-400' : 'text-amber-400')}">
+                                Status: ${sub.status}
+                            </span>
+                            ${isPending ? `
+                                <div class="flex gap-2">
+                                    <button onclick="playSound('click'); adminConfirmTaskProof('${key}')" class="px-3 py-1.5 rounded-xl bg-emerald-500 text-slate-950 font-black text-[10px] uppercase">CONFIRM</button>
+                                    <button onclick="playSound('click'); adminRejectTaskProof('${key}')" class="px-3 py-1.5 rounded-xl bg-rose-600 text-white font-black text-[10px] uppercase">REJECT</button>
+                                </div>
+                            ` : ''}
+                        </div>
+                    </div>
+                `;
+            });
+        }
+        if (countEl) countEl.innerText = `${pending} Pending`;
+        if (pending === 0 && (!snap.exists() || snap.numChildren() === 0)) {
+            container.innerHTML = `<p class="text-xs text-slate-400 text-center py-4">No task proof submissions found.</p>`;
+        }
+    });
+}
+
+window.adminConfirmTaskProof = async function(subKey) {
+    const snap = await db.ref('taskSubmissions/' + subKey).once('value');
+    if (!snap.exists()) return;
+    const sub = snap.val();
+
+    await db.ref('taskSubmissions/' + subKey).update({
+        status: 'Approved',
+        verifiedAt: Date.now()
+    });
+
+    // Credit coins to user
+    const userSnap = await db.ref('users/' + sub.userId).once('value');
+    if (userSnap.exists()) {
+        const uBal = Number(userSnap.val().balance || 0);
+        await db.ref('users/' + sub.userId).update({
+            balance: uBal + Number(sub.reward)
+        });
+        await db.ref('transactions/' + sub.userId).push({
+            type: `Task Approved: ${sub.taskTitle}`,
+            amount: sub.reward,
+            date: new Date().toLocaleDateString(),
+            status: 'Success'
+        });
+    }
+
+    // Remove from waitingTasks
+    if (sub.taskId) {
+        await db.ref(`waitingTasks/${sub.userId}/${sub.taskId}`).remove();
+    }
+
+    window.playSound('win');
+    window.showToast("Task proof approved and coins credited to user!", "success");
+};
+
+window.adminRejectTaskProof = async function(subKey) {
+    const snap = await db.ref('taskSubmissions/' + subKey).once('value');
+    if (!snap.exists()) return;
+    const sub = snap.val();
+
+    await db.ref('taskSubmissions/' + subKey).update({
+        status: 'Rejected',
+        rejectedAt: Date.now()
+    });
+
+    if (sub.taskId) {
+        await db.ref(`waitingTasks/${sub.userId}/${sub.taskId}`).update({
+            status: 'Rejected'
+        });
+    }
+
+    window.showToast("Task proof rejected", "info");
+};
+
+// Admin Section 3: Withdrawals
+function renderAdminWithdrawals() {
+    db.ref('withdrawals').on('value', snap => {
+        const container = document.getElementById('admin-withdrawal-list');
+        if (!container) return;
+        container.innerHTML = '';
+        let pendingCount = 0;
+        if (snap.exists()) {
+            snap.forEach(child => {
+                const w = child.val();
+                const key = child.key;
+                const step = w.statusStep || 1;
+                if (step < 3) pendingCount++;
+                container.innerHTML += `
+                    <div class="glass-panel p-3 rounded-2xl border border-emerald-500/20 space-y-2 text-xs">
+                        <div class="flex justify-between">
+                            <span class="font-black text-white">${w.userName} (${w.userUid})</span>
+                            <span class="font-black text-amber-400">₹${w.rupees} (${w.coins} Coins)</span>
+                        </div>
+                        <div class="text-[10px] text-slate-300 font-mono bg-black/40 p-2 rounded">${w.details}</div>
+                        <div class="flex gap-2 pt-1">
+                            <button onclick="playSound('click'); adminAdvanceWithdrawStep('${key}', 2)" class="flex-1 py-1.5 rounded-lg bg-cyan-600 font-black text-[10px] ${step >= 2 ? 'opacity-50' : ''}">Approve (Step 2)</button>
+                            <button onclick="playSound('click'); adminAdvanceWithdrawStep('${key}', 3)" class="flex-1 py-1.5 rounded-lg bg-emerald-600 font-black text-[10px] ${step === 3 ? 'opacity-50' : ''}">Complete & 5% Ref (Step 3)</button>
+                        </div>
+                    </div>
+                `;
+            });
+        }
+        document.getElementById('admin-pending-count').innerText = `${pendingCount} In-Progress`;
+    });
+}
+
+window.adminAdvanceWithdrawStep = async function(key, targetStep) {
+    const snap = await db.ref('withdrawals/' + key).once('value');
+    if (!snap.exists()) return;
+    const w = snap.val();
+
+    await db.ref('withdrawals/' + key).update({
+        statusStep: targetStep,
+        statusText: targetStep === 2 ? 'Approved' : 'Successfully Completed'
+    });
+
+    if (targetStep === 3 && !w.referralCommissionGiven) {
+        await db.ref('withdrawals/' + key).update({ referralCommissionGiven: true });
+        const userSnap = await db.ref('users/' + w.userId).once('value');
+        if (userSnap.exists()) {
+            const uData = userSnap.val();
+            const referrerUid = uData.referredByL1;
+            if (referrerUid) {
+                const commissionCoins = Math.floor(Number(w.coins) * 0.05);
+                if (commissionCoins > 0) {
+                    const refQuery = await db.ref('users').orderByChild('uid').equalTo(referrerUid).once('value');
+                    if (refQuery.exists()) {
+                        refQuery.forEach(refUserSnap => {
+                            const refKey = refUserSnap.key;
+                            db.ref('users/' + refKey).update({
+                                balance: Number(refUserSnap.val().balance || 0) + commissionCoins,
+                                refEarnings: Number(refUserSnap.val().refEarnings || 0) + commissionCoins
+                            });
+                            db.ref('transactions/' + refKey).push({
+                                type: `5% Lifetime Commission (${uData.name})`,
+                                amount: commissionCoins,
+                                date: new Date().toLocaleDateString(),
+                                status: 'Success'
+                            });
+                        });
+                    }
+                }
+            }
+        }
+    }
+    window.showToast(`Withdrawal moved to Step ${targetStep}!`, 'success');
+};
+
+window.adminResetTournamentNow = function() {
+    const newStart = Date.now();
+    db.ref('settings/tournamentCycleStart').set(newStart).then(() => {
+        window.showToast("Tournament cycle reset! New 7-day countdown started.", "success");
+        listenTournamentRealtime();
+    });
+};
+
+// ================= DAILY REFRESH & TIMING ENGINE (MIDNIGHT 12:00 AM RESET) =================
+function getTodayDateKey() {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+}
+
+function getTimeUntilMidnightFormatted() {
+    const now = new Date();
+    const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
+    const diff = Math.max(0, midnight.getTime() - now.getTime());
+    const hours = Math.floor(diff / (1000 * 60 * 60));
+    const mins = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+    const secs = Math.floor((diff % (1000 * 60)) / 1000);
+    return `${hours}h ${mins}m ${secs}s`;
+}
+
+function checkAndResetDailySpinAndScratch() {
+    if (!currentAuthUser || !currentUserData) return;
+    const todayKey = getTodayDateKey();
+    let updates = {};
+
+    // 1. Lucky Spin Daily Reset (Automatic after 12:00 AM midnight)
+    if (currentUserData.lastSpinDateKey !== todayKey) {
+        updates.spinsLeft = 3;
+        updates.lastSpinDateKey = todayKey;
+        currentUserData.spinsLeft = 3;
+        currentUserData.lastSpinDateKey = todayKey;
+    }
+
+    if (Object.keys(updates).length > 0) {
+        db.ref('users/' + currentAuthUser.uid).update(updates).catch(() => {});
+    }
+
+    updateDailySpinAndScratchUI();
+}
+
+function updateDailySpinAndScratchUI() {
+    const todayKey = getTodayDateKey();
+    const todayDateStr = new Date().toLocaleDateString();
+    const timeRemaining = getTimeUntilMidnightFormatted();
+
+    // Check if new calendar day (12 AM) arrived while app is running
+    if (currentUserData && currentUserData.lastSpinDateKey && currentUserData.lastSpinDateKey !== todayKey) {
+        checkAndResetDailySpinAndScratch();
+        return;
+    }
+
+    const spinsLeft = Number(currentUserData?.spinsLeft ?? 3);
+
+    // Update spin count badges
+    const fullSpinsLeftEl = document.getElementById('full-spins-left');
+    if (fullSpinsLeftEl) fullSpinsLeftEl.innerText = `${spinsLeft}/3`;
+
+    const homeSpinBadgeEl = document.getElementById('home-spin-badge');
+    if (homeSpinBadgeEl) {
+        if (spinsLeft > 0) {
+            homeSpinBadgeEl.innerText = `(${spinsLeft}/3 LEFT)`;
+            homeSpinBadgeEl.className = "bg-purple-400 text-slate-950 text-[9px] font-black px-2 py-0.5 rounded-full shadow";
+        } else {
+            homeSpinBadgeEl.innerText = `RESETS AT 12 AM`;
+            homeSpinBadgeEl.className = "bg-amber-400 text-slate-950 text-[9px] font-black px-2 py-0.5 rounded-full shadow";
+        }
+    }
+
+    const spinMainBtn = document.getElementById('spin-main-btn');
+    if (spinMainBtn) {
+        if (spinsLeft > 0) {
+            spinMainBtn.innerText = `SPIN NOW (${spinsLeft} LEFT)`;
+            spinMainBtn.disabled = false;
+            spinMainBtn.className = "w-full glow-btn-green text-slate-950 font-black px-4 py-4 rounded-2xl text-xs uppercase tracking-wider active:scale-95 transition-transform shadow-lg";
+        } else {
+            spinMainBtn.innerText = `NEXT SPINS AT 12:00 AM (${timeRemaining})`;
+            spinMainBtn.disabled = true;
+            spinMainBtn.className = "w-full bg-slate-800/80 text-slate-400 border border-white/10 font-black px-4 py-4 rounded-2xl text-xs uppercase tracking-wider shadow-none opacity-80 cursor-not-allowed";
+        }
+    }
+
+    const spinTimerText = document.getElementById('spin-timer-text');
+    if (spinTimerText) {
+        if (spinsLeft <= 0) {
+            spinTimerText.innerHTML = `All spins used today. Refreshes at 12:00 AM Midnight in <strong class="text-amber-400 font-bold">${timeRemaining}</strong>`;
+        } else {
+            spinTimerText.innerHTML = `Daily 3 spins refresh every 24h at 12:00 AM Midnight (in <span class="text-amber-300 font-bold">${timeRemaining}</span>)`;
+        }
+    }
+
+    // Scratch card check: unlocks automatically after 12:00 AM midnight
+    const hasScratchedToday = (currentUserData?.lastScratchDateKey === todayKey) || (currentUserData?.lastScratchDate === todayDateStr);
+    const seBtn = document.getElementById('scratch-entry-btn');
+    const sdMsg = document.getElementById('scratch-done-msg');
+    const scratchCountdownEl = document.getElementById('scratch-countdown-display');
+    const scratchTimerSub = document.getElementById('scratch-timer-sub');
+
+    if (hasScratchedToday) {
+        if (seBtn) seBtn.classList.add('hidden');
+        if (sdMsg) {
+            sdMsg.classList.remove('hidden');
+            sdMsg.classList.add('flex');
+        }
+        if (scratchCountdownEl) {
+            scratchCountdownEl.innerHTML = `<i class="fas fa-clock mr-1"></i> In ${timeRemaining}`;
+        }
+        if (scratchTimerSub) {
+            scratchTimerSub.innerText = "Refreshes at 12:00 AM Midnight";
+        }
+    } else {
+        if (seBtn) seBtn.classList.remove('hidden');
+        if (sdMsg) {
+            sdMsg.classList.add('hidden');
+            sdMsg.classList.remove('flex');
+        }
+    }
+}
+
+// Keep live countdown ticking every 1 second
+setInterval(() => {
+    updateDailySpinAndScratchUI();
+}, 1000);
+
+// ================= LUCKY SPIN =================
+window.openSpinPage = function() {
+    updateDailySpinAndScratchUI();
+    document.getElementById('spin-page')?.classList.remove('hidden');
+    document.getElementById('spin-page')?.classList.add('flex');
+};
+window.closeSpinPage = function() {
+    document.getElementById('spin-page')?.classList.add('hidden');
+    document.getElementById('spin-page')?.classList.remove('flex');
+};
+
+window.executeSpinAnimation = async function() {
+    if (isSpinning || !currentAuthUser) return;
+    const todayKey = getTodayDateKey();
+
+    // Check if new day has arrived to refresh spins
+    if (currentUserData?.lastSpinDateKey !== todayKey) {
+        currentUserData.spinsLeft = 3;
+        currentUserData.lastSpinDateKey = todayKey;
+        await db.ref('users/' + currentAuthUser.uid).update({
+            spinsLeft: 3,
+            lastSpinDateKey: todayKey
+        });
+    }
+
+    const currentSpins = Number(currentUserData?.spinsLeft ?? 3);
+    if (currentSpins <= 0) {
+        window.showToast(`Daily spin limit reached! Refreshes at 12:00 AM (${getTimeUntilMidnightFormatted()})`, "error");
+        return;
+    }
+
+    isSpinning = true;
+    const prize = currentWheelSegments[Math.floor(Math.random() * currentWheelSegments.length)];
+    const targetIdx = currentWheelSegments.indexOf(prize);
+    const finalAngle = (360 * 6) + (360 - (targetIdx * 30));
+    const wheel = document.getElementById('spin-wheel');
+    wheel.style.transition = 'transform 4.5s cubic-bezier(0.175, 0.885, 0.32, 1.275)';
+    wheel.style.transform = `rotate(${finalAngle}deg)`;
+
+    window.playDeceleratingSpinSound(4500);
+
+    setTimeout(async () => {
+        wheel.style.transition = 'none';
+        wheel.style.transform = `rotate(${finalAngle % 360}deg)`;
+        isSpinning = false;
+        const remaining = Math.max(0, currentSpins - 1);
+        currentUserData.spinsLeft = remaining;
+        currentUserData.lastSpinDateKey = todayKey;
+        currentUserData.balance = Number(currentUserData?.balance || 0) + prize;
+
+        await db.ref('users/' + currentAuthUser.uid).update({
+            balance: currentUserData.balance,
+            spinsLeft: remaining,
+            lastSpinDateKey: todayKey,
+            lastSpinTimestamp: Date.now()
+        });
+        await db.ref('transactions/' + currentAuthUser.uid).push({
+            type: 'Lucky Spin Reward',
+            amount: prize,
+            date: new Date().toLocaleDateString(),
+            status: 'Success'
+        });
+        window.playSound('win');
+        window.showToast(`🎉 You Won ${prize} Coins! (${remaining} spins left today)`, 'success');
+        updateDailySpinAndScratchUI();
+    }, 4700);
+};
+
+// ================= SCRATCH CARD ENGINE =================
+let canvasScratch, ctxScratch, isDrawingScratch = false, scratchCompleted = false, scratchValue = 0;
+window.openScratchModal = function() {
+    const todayKey = getTodayDateKey();
+    const todayDateStr = new Date().toLocaleDateString();
+    if (currentUserData?.lastScratchDateKey === todayKey || currentUserData?.lastScratchDate === todayDateStr) {
+        window.showToast(`Already scratched today! Next card available at 12:00 AM (${getTimeUntilMidnightFormatted()})`, "error");
+        return;
+    }
+    document.getElementById('scratch-modal').classList.remove('hidden');
+    document.getElementById('scratch-modal').classList.add('flex');
+    scratchValue = Math.floor(Math.random() * 45) + 5;
+    document.getElementById('scratch-win-amount').innerText = scratchValue + " Coins";
+    document.getElementById('scratch-canvas').style.display = 'block';
+    setTimeout(() => initScratchCard(), 50);
+};
+
+function initScratchCard() {
+    canvasScratch = document.getElementById('scratch-canvas');
+    if (!canvasScratch) return;
+    ctxScratch = canvasScratch.getContext('2d');
+    canvasScratch.width = canvasScratch.offsetWidth;
+    canvasScratch.height = canvasScratch.offsetHeight;
+    ctxScratch.fillStyle = '#064e3b';
+    ctxScratch.fillRect(0, 0, canvasScratch.width, canvasScratch.height);
+    ctxScratch.font = "bold 18px Plus Jakarta Sans, sans-serif";
+    ctxScratch.fillStyle = "#34d399";
+    ctxScratch.textAlign = "center";
+    ctxScratch.fillText("SCRATCH ME", canvasScratch.width / 2, canvasScratch.height / 2);
+
+    scratchCompleted = false;
+    document.getElementById('close-scratch-btn').classList.add('hidden');
+    canvasScratch.ontouchstart = (e) => { e.preventDefault(); isDrawingScratch = true; scratch(e); };
+    canvasScratch.ontouchmove = (e) => { e.preventDefault(); scratch(e); };
+    canvasScratch.ontouchend = () => { isDrawingScratch = false; checkScratchPercent(); };
+    canvasScratch.onmousedown = (e) => { isDrawingScratch = true; scratch(e); };
+    canvasScratch.onmousemove = scratch;
+    canvasScratch.onmouseup = () => { isDrawingScratch = false; checkScratchPercent(); };
+}
+
+function scratch(e) {
+    if (!isDrawingScratch || scratchCompleted) return;
+    window.playSound('scratch');
+    let rect = canvasScratch.getBoundingClientRect();
+    let x = (e.clientX || (e.touches && e.touches[0].clientX)) - rect.left;
+    let y = (e.clientY || (e.touches && e.touches[0].clientY)) - rect.top;
+    ctxScratch.globalCompositeOperation = 'destination-out';
+    ctxScratch.beginPath();
+    ctxScratch.arc(x, y, 24, 0, Math.PI * 2);
+    ctxScratch.fill();
+}
+
+function checkScratchPercent() {
+    if (scratchCompleted) return;
+    let pixels = ctxScratch.getImageData(0, 0, canvasScratch.width, canvasScratch.height).data;
+    let trans = 0;
+    for (let i = 3; i < pixels.length; i += 4) { if (pixels[i] === 0) trans++; }
+    if ((trans / (pixels.length / 4)) * 100 > 40) {
+        scratchCompleted = true;
+        canvasScratch.style.display = 'none';
+        const todayKey = getTodayDateKey();
+        const todayDateStr = new Date().toLocaleDateString();
+        currentUserData.balance = Number(currentUserData?.balance || 0) + scratchValue;
+        currentUserData.lastScratchDate = todayDateStr;
+        currentUserData.lastScratchDateKey = todayKey;
+
+        db.ref('users/' + currentAuthUser.uid).update({
+            balance: currentUserData.balance,
+            lastScratchDate: todayDateStr,
+            lastScratchDateKey: todayKey,
+            lastScratchTimestamp: Date.now()
+        });
+        db.ref('transactions/' + currentAuthUser.uid).push({
+            type: 'Daily Scratch Bonus',
+            amount: scratchValue,
+            date: todayDateStr,
+            status: 'Success'
+        });
+        document.getElementById('close-scratch-btn').classList.remove('hidden');
+        window.playSound('win');
+        window.showToast(`🎉 You won ${scratchValue} Coins! Refreshes at 12:00 AM.`, 'success');
+        updateDailySpinAndScratchUI();
+    }
+}
+window.closeScratchModal = function() { 
+    document.getElementById('scratch-modal').classList.add('hidden'); 
+    document.getElementById('scratch-modal').classList.remove('flex');
+    updateDailySpinAndScratchUI();
+};
+
+// ================= PROCEDURAL ARROW PUZZLE ENGINE =================
+const puzzleSettings = {
+    data: { sound: true, haptics: true, grid: true, highestUnlocked: 1, completedLevels: [] },
+    load() {
+        try {
+            const saved = localStorage.getItem('arrow_pro_fix_save');
+            if (saved) this.data = { ...this.data, ...JSON.parse(saved) };
+        } catch(e){}
+    },
+    save() {
+        localStorage.setItem('arrow_pro_fix_save', JSON.stringify(this.data));
+    },
+    toggle(key) {
+        this.data[key] = !this.data[key];
+        this.save();
+        document.getElementById(`toggle-${key}`)?.classList.toggle('active', !!this.data[key]);
+        if (key === 'grid') puzzleGame.draw();
+    }
+};
+window.puzzleSettings = puzzleSettings;
+
+class LevelGenerator {
+    static generateLevel(levelId) {
+        let count = Math.min(60, 4 + Math.floor(levelId * 0.7));
+        let gridSize = Math.max(10, Math.ceil(Math.sqrt(count * 16)));
+        if (gridSize % 2 !== 0) gridSize++;
+
+        const DIRS = [ { dx: 1, dy: 0 }, { dx: -1, dy: 0 }, { dx: 0, dy: 1 }, { dx: 0, dy: -1 } ];
+        let arrows = [];
+
+        for (let i = 1; i <= count; i++) {
+            let dir = DIRS[i % 4];
+            let sx = 2 + (i * 2) % (gridSize - 4);
+            let sy = 2 + ((i * 3) % (gridSize - 4));
+            arrows.push({
+                id: i,
+                gridSize: gridSize,
+                points: [{ x: sx, y: sy }, { x: sx + dir.dx * 2, y: sy + dir.dy * 2 }],
+                dx: dir.dx,
+                dy: dir.dy,
+                exit: { x: sx + dir.dx * 2, y: sy + dir.dy * 2 },
+                animAlpha: 1,
+                isEscaping: false
+            });
+        }
+        return { id: levelId, gridSize: gridSize, arrows: arrows };
+    }
+}
+
+const puzzleGame = {
+    canvas: null, ctx: null, currentLevel: 1, levelData: null, arrows: [], lives: 3, hints: 2,
+    init() {
+        this.canvas = document.getElementById('game-canvas');
+        if (this.canvas) this.ctx = this.canvas.getContext('2d');
+        puzzleSettings.load();
+        this.setupListeners();
+        this.resize();
+        window.addEventListener('resize', () => this.resize());
+        this.loop();
+    },
+    resize() {
+        const wrap = document.getElementById('board-wrap');
+        if (!wrap || !this.canvas) return;
+        this.canvas.width = wrap.clientWidth;
+        this.canvas.height = wrap.clientHeight;
+        this.draw();
+    },
+    startLevel(id) {
+        this.currentLevel = id;
+        this.levelData = LevelGenerator.generateLevel(id);
+        this.arrows = JSON.parse(JSON.stringify(this.levelData.arrows));
+        this.lives = 3;
+        this.hints = 2;
+        document.getElementById('game-level-indicator').innerText = `Level ${id}`;
+        document.getElementById('game-arrow-count').innerText = `↗ ${this.arrows.length} Left`;
+        puzzleUI.showScreen('screen-game');
+        this.resize();
+    },
+    restartLevel() { this.startLevel(this.currentLevel); },
+    nextLevel() { this.startLevel(this.currentLevel + 1); },
+    useHint() {
+        const unescaped = this.arrows.filter(a => !a.isEscaping);
+        if (unescaped.length > 0) {
+            unescaped[0].animAlpha = 0.5;
+            setTimeout(() => unescaped[0].animAlpha = 1, 300);
+        }
+    },
+    toggleGrid() { puzzleSettings.toggle('grid'); },
+    setupListeners() {
+        this.canvas?.addEventListener('click', () => {
+            const unescaped = this.arrows.find(a => !a.isEscaping);
+            if (unescaped) {
+                unescaped.isEscaping = true;
+                window.playSound('click');
+                document.getElementById('game-arrow-count').innerText = `↗ ${this.arrows.filter(a => !a.isEscaping).length} Left`;
+                if (this.arrows.every(a => a.isEscaping)) {
+                    setTimeout(() => {
+                        window.playSound('win');
+                        triggerGameAdBreak();
+                        puzzleUI.showScreen('screen-complete');
+                    }, 400);
+                }
+            }
+        });
+    },
+    loop() {
+        this.draw();
+        requestAnimationFrame(() => this.loop());
+    },
+    draw() {
+        if (!this.ctx || !this.canvas || !this.levelData) return;
+        const ctx = this.ctx;
+        ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+
+        const wrap = document.getElementById('board-wrap');
+        const boardBaseSize = Math.min(wrap.clientWidth, wrap.clientHeight) * 0.92;
+        const gSize = this.levelData.gridSize;
+        const cell = boardBaseSize / gSize;
+
+        ctx.save();
+        ctx.translate((wrap.clientWidth - boardBaseSize) / 2, (wrap.clientHeight - boardBaseSize) / 2);
+
+        for (let arrow of this.arrows) {
+            if (arrow.isEscaping) continue;
+            ctx.strokeStyle = "#34d399";
+            ctx.lineWidth = 8;
+            ctx.lineCap = "round";
+            ctx.beginPath();
+            ctx.moveTo(arrow.points[0].x * cell, arrow.points[0].y * cell);
+            ctx.lineTo(arrow.points[1].x * cell, arrow.points[1].y * cell);
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
+};
+window.puzzleGame = puzzleGame;
+
+const puzzleUI = {
+    currentPage: 0,
+    showScreen(id) {
+        document.querySelectorAll('.game-screen-sub').forEach(s => s.classList.remove('active'));
+        document.getElementById(id)?.classList.add('active');
+        if (id === 'screen-levels') this.renderLevels();
+    },
+    changeLevelPage(delta) {
+        this.currentPage = Math.max(0, this.currentPage + delta);
+        this.renderLevels();
+    },
+    renderLevels() {
+        const c = document.getElementById('levels-container');
+        if (!c) return;
+        c.innerHTML = '';
+        const pageSize = 50;
+        const start = this.currentPage * pageSize + 1;
+        const end = start + pageSize - 1;
+        document.getElementById('level-page-indicator').innerText = `${start} - ${end}`;
+        document.getElementById('btn-prev-page').disabled = this.currentPage === 0;
+
+        for (let i = start; i <= end; i++) {
+            const cell = document.createElement('div');
+            cell.className = 'level-cell';
+            cell.innerHTML = `<span>${i}</span><span class="text-[8.5px] text-amber-400 font-bold">+2🪙</span>`;
+            cell.onclick = () => { window.playSound('click'); puzzleGame.startLevel(i); };
+            c.appendChild(cell);
+        }
+    }
+};
+window.puzzleUI = puzzleUI;
+
+// ================= 100+ AVATAR SELECTION ENGINE =================
+let allAvatarsList = [];
+function generate100PlusAvatars() {
+    allAvatarsList = [];
+    const maleSeeds = ["Alex", "Leo", "Max", "Sam", "Ryan", "Chris", "Jake", "Noah", "Liam", "Lucas", "Oliver", "Ethan", "Mason", "Logan", "James", "Ben", "Jacob", "David", "Daniel", "Henry", "Jackson", "Aiden", "Matthew", "Carter", "Luke", "Grayson", "Levi", "Isaac", "Gabriel", "Mateo", "Jaxon", "Lincoln", "Hunter", "Aaron", "Zane", "Axel", "Blake", "Cole"];
+    const femaleSeeds = ["Emma", "Olivia", "Ava", "Sophia", "Isabella", "Mia", "Amelia", "Harper", "Evelyn", "Abigail", "Emily", "Ella", "Elizabeth", "Camila", "Luna", "Sofia", "Avery", "Mila", "Aria", "Scarlett", "Penelope", "Layla", "Chloe", "Victoria", "Madison", "Eleanor", "Grace", "Nora", "Riley", "Zoey", "Hannah", "Hazel", "Lily", "Ellie", "Violet"];
+    const gamingSeeds = ["Shadow", "Vortex", "Apex", "Cyber", "Titan", "Phantom", "Blaze", "Nova", "Raptor", "Striker", "Knight", "Ghost", "Falcon", "Omega", "Spectre", "Zenith", "Volt", "Havoc", "Frost", "Reaper", "Matrix", "Sniper", "GamerX", "ProArrow", "Speedy", "Legend", "Nitro", "Stealth", "Fury", "Alpha"];
+
+    maleSeeds.forEach(s => allAvatarsList.push({ seed: s, cat: 'male', url: `https://api.dicebear.com/7.x/adventurer/svg?seed=${s}&backgroundColor=b6e3f4,c0aede,d1d4f9` }));
+    femaleSeeds.forEach(s => allAvatarsList.push({ seed: s, cat: 'female', url: `https://api.dicebear.com/7.x/adventurer/svg?seed=${s}&backgroundColor=ffd5dc,ffdfbf,c0aede` }));
+    gamingSeeds.forEach(s => allAvatarsList.push({ seed: s, cat: 'gaming', url: `https://api.dicebear.com/7.x/bottts/svg?seed=${s}&backgroundColor=0f172a,1e1b4b` }));
+
+    renderAvatarGrid(allAvatarsList);
+}
+
+function renderAvatarGrid(list) {
+    const grid = document.getElementById('avatar-grid');
+    if (!grid) return;
+    grid.innerHTML = '';
+    list.forEach(av => {
+        grid.innerHTML += `
+            <div onclick="playSound('click'); selectUserAvatar('${av.url}')" class="glass-panel p-1 rounded-2xl cursor-pointer hover:border-emerald-400 active:scale-95 transition-all text-center">
+                <img src="${av.url}" class="w-full aspect-square rounded-xl object-cover bg-black/40">
+            </div>
+        `;
+    });
+}
+
+window.filterAvatarCategory = function(cat) {
+    ['all', 'male', 'female', 'gaming'].forEach(c => {
+        const b = document.getElementById('av-cat-' + c);
+        if (b) b.className = (c === cat) ? "px-3.5 py-1.5 rounded-xl bg-emerald-500 text-slate-950" : "px-3.5 py-1.5 rounded-xl bg-white/10 text-slate-300";
+    });
+    if (cat === 'all') renderAvatarGrid(allAvatarsList);
+    else renderAvatarGrid(allAvatarsList.filter(a => a.cat === cat));
+};
+
+window.selectUserAvatar = async function(url) {
+    if (!currentAuthUser) return;
+    await db.ref('users/' + currentAuthUser.uid).update({ avatar: url });
+    window.closeAvatarModal();
+    window.showToast("Profile avatar updated!", "success");
+};
+
+window.openAvatarModal = function() { 
+    document.getElementById('avatar-modal')?.classList.remove('hidden'); 
+    document.getElementById('avatar-modal')?.classList.add('flex'); 
+};
+window.closeAvatarModal = function() { 
+    document.getElementById('avatar-modal')?.classList.add('hidden'); 
+    document.getElementById('avatar-modal')?.classList.remove('flex'); 
+};
+
+// ================= INTERSTITIAL AD WITH 7S TIMER =================
+let adSkipCountdownInterval = null;
+function triggerGameAdBreak() {
+    const adModal = document.getElementById('game-ad-modal');
+    const closeBtn = document.getElementById('ad-close-btn');
+    const closeBtnText = document.getElementById('ad-close-btn-text');
+    if (!adModal) return;
+
+    let secondsLeft = 7;
+    closeBtn.disabled = true;
+    closeBtn.className = "px-4 py-2 rounded-xl bg-slate-800 text-slate-400 text-xs font-black";
+    closeBtnText.innerText = `Skip in ${secondsLeft}s...`;
+
+    clearInterval(adSkipCountdownInterval);
+    adSkipCountdownInterval = setInterval(() => {
+        secondsLeft--;
+        if (secondsLeft <= 0) {
+            clearInterval(adSkipCountdownInterval);
+            closeBtn.disabled = false;
+            closeBtn.className = "px-4 py-2 rounded-xl glow-btn-green text-slate-950 text-xs font-black cursor-pointer";
+            closeBtnText.innerText = "Close Ad";
+        } else {
+            closeBtnText.innerText = `Skip in ${secondsLeft}s...`;
+        }
+    }, 1000);
+
+    adModal.classList.remove('hidden');
+    adModal.classList.add('flex');
+}
+window.closeGameAdModal = function() { 
+    document.getElementById('game-ad-modal')?.classList.add('hidden'); 
+    document.getElementById('game-ad-modal')?.classList.remove('flex');
+};
+
+// ================= STANDALONE APP INSTALLATION ENGINE =================
+let deferredPWAInstallPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredPWAInstallPrompt = e;
+});
+
+window.triggerPWAInstallPrompt = async function() {
+    if (deferredPWAInstallPrompt) {
+        deferredPWAInstallPrompt.prompt();
+        const choice = await deferredPWAInstallPrompt.userChoice;
+        if (choice.outcome === 'accepted') {
+            window.showToast("EarnPro App successfully installed to Home Screen!", "success");
+            closeAppInstallModal();
+        }
+        deferredPWAInstallPrompt = null;
+    } else {
+        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+        if (isIOS) {
+            window.showToast("On iOS Safari: Tap Share (⎋) -> 'Add to Home Screen' (+)", "info");
+        } else {
+            window.showToast("On Chrome: Tap menu (⋮) -> 'Install app' or 'Add to Home screen'", "info");
+        }
+    }
+};
+
+window.handleAppDownloadAndInstall = async function() {
+    if (window.playSound) window.playSound('click');
+    if (deferredPWAInstallPrompt) {
+        deferredPWAInstallPrompt.prompt();
+        const choice = await deferredPWAInstallPrompt.userChoice;
+        if (choice.outcome === 'accepted') {
+            window.showToast("EarnPro App installed! Open from Home Screen.", "success");
+            return;
+        }
+        deferredPWAInstallPrompt = null;
+    }
+
+    const modal = document.getElementById('app-install-modal');
+    if (modal) {
+        modal.classList.remove('hidden');
+        modal.classList.add('flex');
+    }
+};
+
+window.closeAppInstallModal = function() {
+    const modal = document.getElementById('app-install-modal');
+    if (modal) {
+        modal.classList.add('hidden');
+        modal.classList.remove('flex');
+    }
+};
+
+// ================= INITIAL BOOT =================
+function bootApp() {
+    if (window.puzzleGame && typeof window.puzzleGame.init === 'function') {
+        window.puzzleGame.init();
+    }
+    if (typeof window.generate100PlusAvatars === 'function') {
+        window.generate100PlusAvatars();
+    }
+    if (typeof window.loadRotationalBanners === 'function') {
+        window.loadRotationalBanners();
+    }
+
+    // Register Service Worker for PWA 1-click installability
+    if ('serviceWorker' in navigator && (window.location.protocol === 'http:' || window.location.protocol === 'https:')) {
+        navigator.serviceWorker.register('./sw.js').catch(() => {});
+    }
+}
+
+if (document.readyState === 'loading') {
+    window.addEventListener('DOMContentLoaded', bootApp);
+} else {
+    bootApp();
+}

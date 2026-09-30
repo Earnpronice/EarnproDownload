@@ -1,0 +1,26 @@
+{
+  "id": "/",
+  "name": "EarnPro - Tasks & Tournaments",
+  "short_name": "EarnPro",
+  "description": "EarnPro - Complete Daily Tasks, Lucky Spin, Scratch Cards, and 7-Day Tournaments",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#010a07",
+  "theme_color": "#064e3b",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

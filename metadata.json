@@ -1,0 +1,6 @@
+{
+  "name": "EarnPro",
+  "description": "Next-Gen Rewards & Daily Code Tasks Arena with 7-Day Tournaments and Task Proof Verification",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
